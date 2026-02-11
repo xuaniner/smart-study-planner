@@ -16,10 +16,7 @@ st.caption("Portfolio Project • Grade 12 STEM • Priority = Difficulty × Urg
 # Profile (Per-user storage)
 # -----------------------------
 with st.expander("👤 Profile", expanded=False):
-    user_code = st.text_input(
-        "User code (choose anything like jhune, demo1)",
-        value="demo"
-    ).strip().lower()
+    user_code = st.text_input("User code", value="demo").strip().lower()
 
 safe_code = "".join(ch for ch in user_code if ch.isalnum() or ch in ["_", "-"])
 if not safe_code:
@@ -59,11 +56,17 @@ def nice_date(d):
     return pd.to_datetime(d).strftime("%b %d, %Y")
 
 # -----------------------------
-# Session init
+# Session Init
 # -----------------------------
 if "active_user_code" not in st.session_state or st.session_state.active_user_code != safe_code:
     st.session_state.active_user_code = safe_code
     st.session_state.subjects = load_df()
+
+if "plan_ready" not in st.session_state:
+    st.session_state.plan_ready = False
+
+if "timer_running" not in st.session_state:
+    st.session_state.timer_running = False
 
 # -----------------------------
 # Settings
@@ -75,12 +78,13 @@ with st.expander("⚙️ Settings", expanded=False):
 # -----------------------------
 # Add Subject
 # -----------------------------
-st.subheader("1) Add / Edit Subjects")
+st.subheader("1) Subjects")
 
 with st.expander("➕ Add Subject", expanded=False):
     new_sub = st.text_input("Subject name")
     new_diff = st.slider("Difficulty (1–5)", 1, 5, 3)
     new_exam = st.date_input("Exam date", value=date.today() + timedelta(days=7))
+
     if st.button("Add"):
         if new_sub.strip():
             df_add = st.session_state.subjects.copy()
@@ -107,10 +111,6 @@ if st.button("💾 Save Changes"):
 # Update Plan
 # -----------------------------
 st.divider()
-
-if "plan_ready" not in st.session_state:
-    st.session_state.plan_ready = False
-
 if st.button("✅ Update Plan"):
     st.session_state.plan_ready = True
 
@@ -121,6 +121,9 @@ df = edited_df.copy()
 st.session_state.subjects = df
 save_df(df)
 
+# -----------------------------
+# Compute Logic
+# -----------------------------
 df = df.dropna(subset=["Subject"])
 df["Difficulty (1-5)"] = pd.to_numeric(df["Difficulty (1-5)"], errors="coerce").fillna(0)
 df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce").fillna(0)
@@ -136,6 +139,7 @@ df["Urgency"] = 10 / df["Days Left"]
 df["Priority"] = df["Difficulty (1-5)"] * df["Urgency"]
 
 total_priority = df["Priority"].sum()
+
 if total_priority <= 0:
     df["Minutes/Week (Suggested)"] = 0
 else:
@@ -148,11 +152,22 @@ df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested
 # -----------------------------
 st.subheader("⏱ Focus Timer")
 
-if "timer_running" not in st.session_state:
-    st.session_state.timer_running = False
+if not st.session_state.timer_running:
+    subject_list = df["Subject"].tolist()
+    if subject_list:
+        chosen = st.selectbox("Choose subject", subject_list)
+        mins = st.number_input("Minutes", 1, 120, 25)
 
-if st.session_state.timer_running:
+        if st.button("Start Timer"):
+            st.session_state.timer_running = True
+            st.session_state.timer_subject = chosen
+            st.session_state.timer_minutes = mins
+            st.session_state.timer_end = time.time() + mins * 60
+            st.rerun()
+
+else:
     remaining = int(st.session_state.timer_end - time.time())
+
     if remaining <= 0:
         subj = st.session_state.timer_subject
         mins = st.session_state.timer_minutes
@@ -163,25 +178,14 @@ if st.session_state.timer_running:
 
         st.session_state.timer_running = False
         st.success(f"Logged {mins} minutes to {subj}")
-        st.experimental_rerun()
+        st.rerun()
+
     else:
         mm = remaining // 60
         ss = remaining % 60
         st.info(f"Time left: {mm:02d}:{ss:02d}")
         time.sleep(1)
-        st.experimental_rerun()
-
-else:
-    subject_list = df["Subject"].tolist()
-    if subject_list:
-        chosen = st.selectbox("Choose subject", subject_list)
-        mins = st.number_input("Minutes", 1, 120, 25)
-        if st.button("Start Timer"):
-            st.session_state.timer_running = True
-            st.session_state.timer_subject = chosen
-            st.session_state.timer_minutes = mins
-            st.session_state.timer_end = time.time() + mins * 60
-            st.experimental_rerun()
+        st.rerun()
 
 # -----------------------------
 # Dashboard
@@ -219,7 +223,7 @@ for _, row in df.iterrows():
     st.progress(float(row["Progress %"]))
 
 # -----------------------------
-# Plan
+# Study Plan
 # -----------------------------
 st.subheader("5) Study Plan")
 
