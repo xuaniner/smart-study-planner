@@ -44,13 +44,21 @@ df["Days Left"] = df["Exam Date"].apply(lambda d: max(1, (d - today).days))
 df["Urgency"] = 10 / df["Days Left"]
 df["Priority"] = df["Difficulty (1-5)"] * df["Urgency"]
 
-# Convert to numeric safely
-df["Priority"] = pd.to_numeric(df["Priority"], errors="coerce")
+# Weekly allocation
+weekly_minutes = minutes_per_day * 7
+
+# Make sure numeric types (data_editor can return object/text)
+df["Difficulty (1-5)"] = pd.to_numeric(df["Difficulty (1-5)"], errors="coerce")
 df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce")
+
+df["Days Left"] = df["Exam Date"].apply(lambda d: max(1, (d - today).days))
+df["Urgency"] = 10 / df["Days Left"]
+df["Priority"] = (df["Difficulty (1-5)"] * df["Urgency"])
+df["Priority"] = pd.to_numeric(df["Priority"], errors="coerce").fillna(0)
 
 total_priority = df["Priority"].sum()
 
-if total_priority == 0:
+if total_priority <= 0:
     df["Minutes/Week (Suggested)"] = 0
 else:
     df["Minutes/Week (Suggested)"] = (
