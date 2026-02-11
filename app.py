@@ -105,11 +105,17 @@ show_cols = [
     "Minutes/Week (Suggested)",
     "Minutes Done (this week)",
 ]
+display_df = df.copy()
+
+# Format Exam Date nicely
+display_df["Exam Date"] = pd.to_datetime(display_df["Exam Date"]).dt.strftime("%b %d, %Y")
+
 st.dataframe(
-    df[show_cols].sort_values("Minutes/Week (Suggested)", ascending=False),
+    display_df[show_cols].sort_values("Minutes/Week (Suggested)", ascending=False),
     use_container_width=True,
     hide_index=True,
 )
+
 
 # ---------- Progress (wow factor) ----------
 st.subheader("3) Progress")
