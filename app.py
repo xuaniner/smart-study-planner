@@ -1,50 +1,146 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
-# ---------- Page config ----------
+# -----------------------------
+# Config
+# -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
+DATA_PATH = Path("data.csv")
 
-st.title("📚 Smart Study Planner Dashboard")
+st.title("📚 Smart Study Planner")
 st.caption("Portfolio Project • Grade 12 STEM • Priority = Difficulty × Urgency")
 
-# ---------- Sidebar ----------
-st.sidebar.header("Settings")
-minutes_per_day = st.sidebar.number_input(
-    "Minutes available per day", min_value=30, max_value=600, value=180, step=10
-)
-days_to_plan = st.sidebar.slider("Plan length (days)", min_value=3, max_value=14, value=7)
+# -----------------------------
+# Helpers: Load / Save (Persistent memory)
+# -----------------------------
+def default_df() -> pd.DataFrame:
+    today = date.today()
+    return pd.DataFrame(
+        {
+            "Subject": ["Physics", "Gen Math", "Biology"],
+            "Difficulty (1-5)": [5, 4, 3],
+            "Exam Date": [
+                today + timedelta(days=10),
+                today + timedelta(days=7),
+                today + timedelta(days=14),
+            ],
+            "Minutes Done (this week)": [0, 0, 0],
+        }
+    )
 
-# ---------- Default data ----------
-today = date.today()
-default = pd.DataFrame(
-    {
-        "Subject": ["Physics", "Gen Math", "Biology"],
-        "Difficulty (1-5)": [5, 4, 3],
-        "Exam Date": [
-            today.replace(day=min(today.day + 10, 28)),
-            today.replace(day=min(today.day + 7, 28)),
-            today.replace(day=min(today.day + 14, 28)),
-        ],
-        "Minutes Done (this week)": [0, 0, 0],
-    }
-)
+def load_df() -> pd.DataFrame:
+    if DATA_PATH.exists():
+        try:
+            df = pd.read_csv(DATA_PATH)
+            # Ensure correct columns exist
+            needed = ["Subject", "Difficulty (1-5)", "Exam Date", "Minutes Done (this week)"]
+            for col in needed:
+                if col not in df.columns:
+                    raise ValueError("Missing columns in saved file.")
+            # Parse date column
+            df["Exam Date"] = pd.to_datetime(df["Exam Date"], errors="coerce").dt.date
+            return df
+        except Exception:
+            # If corrupted, fall back to default
+            return default_df()
+    return default_df()
 
-st.subheader("1) Enter your subjects")
-df = st.data_editor(
-    default,
+def save_df(df: pd.DataFrame) -> None:
+    out = df.copy()
+    out["Exam Date"] = pd.to_datetime(out["Exam Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out.to_csv(DATA_PATH, index=False)
+
+def nice_date(d) -> str:
+    try:
+        return pd.to_datetime(d).strftime("%b %d, %Y")
+    except Exception:
+        return ""
+
+# -----------------------------
+# Session state init
+# -----------------------------
+if "subjects" not in st.session_state:
+    st.session_state.subjects = load_df()
+
+# -----------------------------
+# Mobile-friendly Settings (no sidebar)
+# -----------------------------
+with st.expander("⚙️ Settings", expanded=False):
+    minutes_per_day = st.number_input("Minutes available per day", 30, 600, 180, 10)
+    days_to_plan = st.slider("Plan length (days)", 3, 14, 7)
+
+# -----------------------------
+# Add subject (mobile-friendly)
+# -----------------------------
+st.subheader("1) Add / Edit Subjects")
+
+with st.expander("➕ Add a subject", expanded=False):
+    new_subject = st.text_input("Subject name", placeholder="e.g., Statistics")
+    new_diff = st.slider("Difficulty (1–5)", 1, 5, 3)
+    new_exam = st.date_input("Exam date", value=date.today() + timedelta(days=7))
+    add_btn = st.button("Add subject")
+
+    if add_btn:
+        s = (new_subject or "").strip()
+        if not s:
+            st.warning("Please enter a subject name.")
+        else:
+            df = st.session_state.subjects.copy()
+            df.loc[len(df)] = [s, int(new_diff), new_exam, 0]
+            st.session_state.subjects = df
+            save_df(df)
+            st.success(f"Added: {s}")
+
+# -----------------------------
+# Editable table (optional, still available)
+# -----------------------------
+st.write("You can also edit directly below (works best on laptop):")
+
+edited_df = st.data_editor(
+    st.session_state.subjects,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Exam Date": st.column_config.DateColumn(
-            "Exam Date",
-            format="MMM DD, YYYY",
-        )
+        "Exam Date": st.column_config.DateColumn("Exam Date", format="MMM DD, YYYY"),
+        "Difficulty (1-5)": st.column_config.NumberColumn("Difficulty (1-5)", min_value=1, max_value=5, step=1),
+        "Minutes Done (this week)": st.column_config.NumberColumn("Minutes Done (this week)", min_value=0, step=10),
     },
 )
 
+# Buttons: Save / Reset
+colA, colB, colC = st.columns([1, 1, 3])
+with colA:
+    save_now = st.button("💾 Save changes")
+with colB:
+    reset = st.button("🗑 Reset to default")
 
-# ---------- Clean / validate ----------
+if reset:
+    st.session_state.subjects = default_df()
+    save_df(st.session_state.subjects)
+    st.success("Reset done. Reloading is safe now.")
+
+if save_now:
+    st.session_state.subjects = edited_df.copy()
+    save_df(st.session_state.subjects)
+    st.success("Saved! Your data will stay even if you refresh.")
+
+# -----------------------------
+# Update button (prevents constant reruns feeling)
+# -----------------------------
+st.divider()
+with st.form("update_form"):
+    st.write("When ready, tap **Update plan** to compute the schedule.")
+    update = st.form_submit_button("✅ Update plan")
+
+if not update:
+    st.stop()
+
+# -----------------------------
+# Compute (safe, robust)
+# -----------------------------
+df = st.session_state.subjects.copy()
 df = df.dropna(subset=["Subject"])
 df["Subject"] = df["Subject"].astype(str).str.strip()
 df = df[df["Subject"] != ""]
@@ -53,24 +149,22 @@ if df.empty:
     st.warning("Add at least one subject.")
     st.stop()
 
-# ---------- Type fixes (data_editor can output text/object types) ----------
+today = date.today()
+weekly_minutes = int(minutes_per_day * 7)
+
+# Numeric conversions
 df["Difficulty (1-5)"] = pd.to_numeric(df["Difficulty (1-5)"], errors="coerce").fillna(0)
 df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce").fillna(0)
 
-# Convert Exam Date safely; blanks/invalid become NaT then set to today
+# Date conversion
 exam_ts = pd.to_datetime(df["Exam Date"], errors="coerce").fillna(pd.Timestamp(today))
 df["Exam Date"] = exam_ts.dt.date
 
-# ---------- Compute scores ----------
-# Days left (min 1)
+# Days left / urgency / priority
 df["Days Left"] = exam_ts.dt.date.apply(lambda d: max(1, (d - today).days)).astype(int)
-
-# Urgency and Priority
 df["Urgency"] = 10 / df["Days Left"]
 df["Priority"] = (df["Difficulty (1-5)"] * df["Urgency"]).fillna(0)
 
-# ---------- Allocate minutes/week ----------
-weekly_minutes = minutes_per_day * 7
 total_priority = float(df["Priority"].sum())
 
 if total_priority <= 0:
@@ -80,43 +174,40 @@ else:
         (df["Priority"] / total_priority) * weekly_minutes
     ).fillna(0).round().astype(int)
 
-# Progress %
 df["Progress %"] = (
     (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested)"])
-    .replace([pd.NA, pd.NaT], 0)
-    .fillna(0)
-    .clip(0, 1)
+    .fillna(0).clip(0, 1)
 )
 
-# ---------- Dashboard cards ----------
-st.divider()
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Minutes/day", f"{minutes_per_day}")
-c2.metric("Weekly minutes", f"{weekly_minutes}")
+# -----------------------------
+# Dashboard (compact for mobile)
+# -----------------------------
+st.subheader("2) Dashboard")
+
+c1, c2 = st.columns(2)
+c3, c4 = st.columns(2)
 
 most_urgent_subject = df.sort_values("Days Left").iloc[0]["Subject"]
 next_exam_date = df["Exam Date"].min()
 
+c1.metric("Minutes/day", f"{minutes_per_day}")
+c2.metric("Weekly minutes", f"{weekly_minutes}")
 c3.metric("Most urgent subject", str(most_urgent_subject))
-c4.metric("Next exam date", pd.to_datetime(next_exam_date).strftime("%b %d, %Y"))
+c4.metric("Next exam date", nice_date(next_exam_date))
 
+# -----------------------------
+# Results table (formatted dates)
+# -----------------------------
+st.subheader("3) Results (auto-calculated)")
 
-# ---------- Results table ----------
-st.subheader("2) Results (auto-calculated)")
 show_cols = [
     "Subject",
     "Difficulty (1-5)",
     "Exam Date",
     "Days Left",
-    "Urgency",
-    "Priority",
     "Minutes/Week (Suggested)",
     "Minutes Done (this week)",
 ]
-display_df = df.copy()
-
-# Format Exam Date nicely
-display_df["Exam Date"] = pd.to_datetime(display_df["Exam Date"]).dt.strftime("%b %d, %Y")
 
 st.dataframe(
     df[show_cols].sort_values("Minutes/Week (Suggested)", ascending=False),
@@ -127,19 +218,20 @@ st.dataframe(
     },
 )
 
-
-
-# ---------- Progress (wow factor) ----------
-st.subheader("3) Progress")
+# -----------------------------
+# Progress bars
+# -----------------------------
+st.subheader("4) Progress")
 for _, row in df.sort_values("Minutes/Week (Suggested)", ascending=False).iterrows():
     done = int(row["Minutes Done (this week)"])
     target = int(row["Minutes/Week (Suggested)"])
     st.write(f"**{row['Subject']}** — {done}/{target} min")
     st.progress(float(row["Progress %"]))
 
-# ---------- Plan ----------
-st.divider()
-st.subheader(f"4) {days_to_plan}-Day Plan (Top subjects each day)")
+# -----------------------------
+# Plan (7–14 days)
+# -----------------------------
+st.subheader(f"5) {days_to_plan}-Day Plan")
 
 ranked = df.sort_values("Minutes/Week (Suggested)", ascending=False).reset_index(drop=True)
 top = ranked.head(min(3, len(ranked))).copy()
@@ -153,7 +245,7 @@ else:
 
 plan_rows = []
 for i in range(days_to_plan):
-    day_label = (pd.Timestamp(today) + pd.Timedelta(days=i)).strftime("%a, %b %d")
+    day_label = (pd.Timestamp(today) + pd.Timedelta(days=i)).strftime("%b %d, %Y")
     for idx in range(len(top)):
         plan_rows.append(
             {
@@ -166,4 +258,4 @@ for i in range(days_to_plan):
 plan = pd.DataFrame(plan_rows)
 st.dataframe(plan, use_container_width=True, hide_index=True)
 
-st.caption("Tip: Try changing exam dates or difficulty—everything updates automatically.")
+st.caption("✅ Data is saved to data.csv (persistent). If you refresh, your subjects remain.")
