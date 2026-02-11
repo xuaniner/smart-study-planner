@@ -35,7 +35,14 @@ df = st.data_editor(
     default,
     num_rows="dynamic",
     use_container_width=True,
+    column_config={
+        "Exam Date": st.column_config.DateColumn(
+            "Exam Date",
+            format="MMM DD, YYYY",
+        )
+    },
 )
+
 
 # ---------- Clean / validate ----------
 df = df.dropna(subset=["Subject"])
@@ -91,7 +98,8 @@ most_urgent_subject = df.sort_values("Days Left").iloc[0]["Subject"]
 next_exam_date = df["Exam Date"].min()
 
 c3.metric("Most urgent subject", str(most_urgent_subject))
-c4.metric("Next exam date", str(next_exam_date))
+c4.metric("Next exam date", pd.to_datetime(next_exam_date).strftime("%b %d, %Y"))
+
 
 # ---------- Results table ----------
 st.subheader("2) Results (auto-calculated)")
@@ -111,10 +119,14 @@ display_df = df.copy()
 display_df["Exam Date"] = pd.to_datetime(display_df["Exam Date"]).dt.strftime("%b %d, %Y")
 
 st.dataframe(
-    display_df[show_cols].sort_values("Minutes/Week (Suggested)", ascending=False),
+    df[show_cols].sort_values("Minutes/Week (Suggested)", ascending=False),
     use_container_width=True,
     hide_index=True,
+    column_config={
+        "Exam Date": st.column_config.DateColumn("Exam Date", format="MMM DD, YYYY"),
+    },
 )
+
 
 
 # ---------- Progress (wow factor) ----------
