@@ -140,7 +140,13 @@ if not update:
 # -----------------------------
 # Compute (safe, robust)
 # -----------------------------
-df = st.session_state.subjects.copy()
+# Always compute from what’s currently on the screen
+df = edited_df.copy()
+
+# Also update memory so it matches your latest edits
+st.session_state.subjects = df
+save_df(df)
+
 df = df.dropna(subset=["Subject"])
 df["Subject"] = df["Subject"].astype(str).str.strip()
 df = df[df["Subject"] != ""]
