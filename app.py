@@ -7,10 +7,25 @@ from pathlib import Path
 # Config
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
-DATA_PATH = Path("data.csv")
 
 st.title("📚 Smart Study Planner")
 st.caption("Portfolio Project • Grade 12 STEM • Priority = Difficulty × Urgency")
+
+# -----------------------------
+# Profile (Per-user storage)
+# -----------------------------
+with st.expander("👤 Profile", expanded=False):
+    user_code = st.text_input(
+        "User code (anything you choose, e.g. jhune, demo1)",
+        value="demo"
+    ).strip().lower()
+
+# Make it filename-safe
+safe_code = "".join(ch for ch in user_code if ch.isalnum() or ch in ["_", "-"])
+if not safe_code:
+    safe_code = "demo"
+
+DATA_PATH = Path(f"data_{safe_code}.csv")
 
 # -----------------------------
 # Helpers: Load / Save (Persistent memory)
@@ -34,16 +49,13 @@ def load_df() -> pd.DataFrame:
     if DATA_PATH.exists():
         try:
             df = pd.read_csv(DATA_PATH)
-            # Ensure correct columns exist
             needed = ["Subject", "Difficulty (1-5)", "Exam Date", "Minutes Done (this week)"]
             for col in needed:
                 if col not in df.columns:
                     raise ValueError("Missing columns in saved file.")
-            # Parse date column
             df["Exam Date"] = pd.to_datetime(df["Exam Date"], errors="coerce").dt.date
             return df
         except Exception:
-            # If corrupted, fall back to default
             return default_df()
     return default_df()
 
@@ -59,9 +71,10 @@ def nice_date(d) -> str:
         return ""
 
 # -----------------------------
-# Session state init
+# Session state init (reload when user_code changes)
 # -----------------------------
-if "subjects" not in st.session_state:
+if "active_user_code" not in st.session_state or st.session_state.active_user_code != safe_code:
+    st.session_state.active_user_code = safe_code
     st.session_state.subjects = load_df()
 
 # -----------------------------
@@ -87,14 +100,14 @@ with st.expander("➕ Add a subject", expanded=False):
         if not s:
             st.warning("Please enter a subject name.")
         else:
-            df = st.session_state.subjects.copy()
-            df.loc[len(df)] = [s, int(new_diff), new_exam, 0]
-            st.session_state.subjects = df
-            save_df(df)
+            df_add = st.session_state.subjects.copy()
+            df_add.loc[len(df_add)] = [s, int(new_diff), new_exam, 0]
+            st.session_state.subjects = df_add
+            save_df(df_add)
             st.success(f"Added: {s}")
 
 # -----------------------------
-# Editable table (optional, still available)
+# Editable table
 # -----------------------------
 st.write("You can also edit directly below (works best on laptop):")
 
@@ -162,7 +175,7 @@ weekly_minutes = int(minutes_per_day * 7)
 df["Difficulty (1-5)"] = pd.to_numeric(df["Difficulty (1-5)"], errors="coerce").fillna(0)
 df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce").fillna(0)
 
-# Date conversion
+# Date conversion (handle blanks safely)
 exam_ts = pd.to_datetime(df["Exam Date"], errors="coerce").fillna(pd.Timestamp(today))
 df["Exam Date"] = exam_ts.dt.date
 
@@ -264,4 +277,4 @@ for i in range(days_to_plan):
 plan = pd.DataFrame(plan_rows)
 st.dataframe(plan, use_container_width=True, hide_index=True)
 
-st.caption("✅ Data is saved to data.csv (persistent). If you refresh, your subjects remain.")
+st.caption("✅ Data is saved per User Code. Different codes have different saved subjects.")
