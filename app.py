@@ -107,7 +107,14 @@ if st.button("💾 Save Changes"):
 # Update Plan
 # -----------------------------
 st.divider()
-if not st.button("✅ Update Plan"):
+
+if "plan_ready" not in st.session_state:
+    st.session_state.plan_ready = False
+
+if st.button("✅ Update Plan"):
+    st.session_state.plan_ready = True
+
+if not st.session_state.plan_ready:
     st.stop()
 
 df = edited_df.copy()
