@@ -44,62 +44,15 @@ df["Days Left"] = df["Exam Date"].apply(lambda d: max(1, (d - today).days))
 df["Urgency"] = 10 / df["Days Left"]
 df["Priority"] = df["Difficulty (1-5)"] * df["Urgency"]
 
-# Weekly allocation
-weekly_minutes = minutes_per_day * 7
+# Convert to numeric safely
+df["Priority"] = pd.to_numeric(df["Priority"], errors="coerce")
+df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce")
+
 total_priority = df["Priority"].sum()
-df["Minutes/Week (Suggested)"] = (df["Priority"] / total_priority * weekly_minutes).round().astype(int)
 
-# Progress %
-df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested)"]).fillna(0).clip(0, 1)
-
-# Dashboard cards
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Minutes/day", f"{minutes_per_day}")
-c2.metric("Weekly minutes", f"{weekly_minutes}")
-most_urgent = df.sort_values("Days Left").iloc[0]["Subject"]
-next_exam = df["Exam Date"].min()
-c3.metric("Most urgent subject", f"{most_urgent}")
-c4.metric("Next exam date", f"{next_exam}")
-
-st.divider()
-
-st.subheader("2) Results (auto-calculated)")
-st.dataframe(
-    df.sort_values("Minutes/Week (Suggested)", ascending=False),
-    use_container_width=True
-)
-
-st.subheader("3) Progress (wow factor)")
-for _, row in df.sort_values("Minutes/Week (Suggested)", ascending=False).iterrows():
-    st.write(f"**{row['Subject']}** — {row['Minutes Done (this week)']}/{row['Minutes/Week (Suggested)']} min")
-    st.progress(float(row["Progress %"]))
-
-st.divider()
-
-st.subheader(f"4) {days_to_plan}-Day Plan (Top subjects each day)")
-
-# Simple daily schedule: split daily minutes across top 3 subjects by suggested minutes/week
-ranked = df.sort_values("Minutes/Week (Suggested)", ascending=False).reset_index(drop=True)
-top = ranked.head(min(3, len(ranked))).copy()
-
-if len(top) == 1:
-    split = [1.0]
-elif len(top) == 2:
-    split = [0.6, 0.4]
+if total_priority == 0:
+    df["Minutes/Week (Suggested)"] = 0
 else:
-    split = [0.5, 0.3, 0.2]
-
-plan_rows = []
-for i in range(days_to_plan):
-    day_label = (today + pd.Timedelta(days=i)).strftime("%a, %b %d")
-    for idx in range(len(top)):
-        plan_rows.append({
-            "Day": day_label,
-            "Subject": top.loc[idx, "Subject"],
-            "Minutes": int(round(minutes_per_day * split[idx]))
-        })
-
-plan = pd.DataFrame(plan_rows)
-st.dataframe(plan, use_container_width=True, hide_index=True)
-
-st.caption("Tip: For higher marks, explain the algorithm and show how changing exam date or difficulty updates the schedule instantly.")
+    df["Minutes/Week (Suggested)"] = (
+        df["Priority"] / total_priority * weekly_minutes
+    ).fillna(0).round().astype(int)
