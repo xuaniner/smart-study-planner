@@ -36,7 +36,7 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
 st.title("📚 Smart Study Planner")
-st.caption("Planner + Timer + Study Files + Assessments (Groq)")
+st.caption("From the section of STEM A")
 
 
 # -----------------------------
