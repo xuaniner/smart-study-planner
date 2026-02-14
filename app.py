@@ -6,16 +6,24 @@ import time
 import json
 import re
 import os
-import base64
 
-# Optional PDF text extraction
+# PDF text extraction
 try:
     from pypdf import PdfReader
     PDF_OK = True
 except Exception:
     PDF_OK = False
 
-# Groq client
+# PDF rendering (preview as images)
+PDF_RENDER_OK = False
+try:
+    import fitz  # PyMuPDF
+    PDF_RENDER_OK = True
+except Exception:
+    PDF_RENDER_OK = False
+
+# Groq
+GROQ_OK = False
 try:
     from groq import Groq
     GROQ_OK = True
@@ -28,11 +36,11 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
 st.title("📚 Smart Study Planner")
-st.caption("Planner + Timer + Study Files + AI Assessments (Groq)")
+st.caption("Planner + Timer + Study Files + Assessments (Groq)")
 
 
 # -----------------------------
-# Profile (Per-user)
+# Profile
 # -----------------------------
 with st.expander("👤 Profile", expanded=False):
     user_code = st.text_input("User code", value="demo").strip().lower()
@@ -46,7 +54,7 @@ META_PATH = FILES_DIR / "files_meta.json"
 
 
 # -----------------------------
-# Helpers: Data save/load
+# Helpers
 # -----------------------------
 def default_df() -> pd.DataFrame:
     t = date.today()
@@ -86,10 +94,6 @@ def sanitize_name(name: str) -> str:
 def now_str() -> str:
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 
-
-# -----------------------------
-# Helpers: File meta
-# -----------------------------
 def load_meta() -> dict:
     if META_PATH.exists():
         try:
@@ -101,10 +105,6 @@ def load_meta() -> dict:
 def save_meta(meta: dict) -> None:
     META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-
-# -----------------------------
-# Helpers: Text extraction + robust JSON parsing
-# -----------------------------
 def extract_text_from_path(p: Path) -> str:
     suf = p.suffix.lower()
     if suf == ".txt":
@@ -125,17 +125,14 @@ def normalize_spaces(s: str) -> str:
 
 def parse_json_loose(raw: str):
     raw = (raw or "").strip()
-    # 1) direct parse
     try:
         return json.loads(raw)
     except Exception:
         pass
-    # 2) try extract first {...}
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end != -1 and end > start:
-        snippet = raw[start:end + 1]
-        return json.loads(snippet)
+        return json.loads(raw[start:end + 1])
     raise ValueError("No JSON object found")
 
 
@@ -149,7 +146,7 @@ if "active_user_code" not in st.session_state or st.session_state.active_user_co
 if "plan_ready" not in st.session_state:
     st.session_state.plan_ready = False
 
-# Timer state
+# timer
 if "timer_running" not in st.session_state:
     st.session_state.timer_running = False
 if "timer_subject" not in st.session_state:
@@ -161,13 +158,23 @@ if "timer_start" not in st.session_state:
 if "timer_end" not in st.session_state:
     st.session_state.timer_end = 0.0
 
-# Preview state
+# preview state
 if "preview_path" not in st.session_state:
     st.session_state.preview_path = ""
 if "preview_name" not in st.session_state:
     st.session_state.preview_name = ""
 if "preview_subject" not in st.session_state:
     st.session_state.preview_subject = ""
+
+# assessment state
+if "quiz" not in st.session_state:
+    st.session_state.quiz = None   # stores generated quiz json
+if "quiz_subject" not in st.session_state:
+    st.session_state.quiz_subject = ""
+if "quiz_file" not in st.session_state:
+    st.session_state.quiz_file = ""
+if "user_answers" not in st.session_state:
+    st.session_state.user_answers = {}  # question_id -> answer text
 
 
 # -----------------------------
@@ -235,10 +242,9 @@ subjects_clean = subjects_clean[subjects_clean != ""].tolist()
 
 
 # -----------------------------
-# Study Files (tagged by subject) + Better Preview UX
+# Study Files (tagged by subject) + Preview as images for PDF
 # -----------------------------
 st.subheader("📁 Study Files (tagged by subject)")
-
 meta = load_meta()
 
 with st.expander("Upload study files", expanded=False):
@@ -264,19 +270,13 @@ with st.expander("Upload study files", expanded=False):
                     path = subj_dir / fname
                     path.write_bytes(f.getbuffer())
                     meta["files"].append(
-                        {
-                            "subject": tag_subject,
-                            "name": fname,
-                            "path": str(path),
-                            "uploaded_at": now_str(),
-                        }
+                        {"subject": tag_subject, "name": fname, "path": str(path), "uploaded_at": now_str()}
                     )
                     added += 1
                 save_meta(meta)
                 st.success(f"Saved {added} file(s) under {tag_subject}.")
                 st.rerun()
 
-# Browser grouped by subject
 if not meta.get("files"):
     st.info("No study files yet. Upload notes above.")
 else:
@@ -307,10 +307,7 @@ else:
                 with col3:
                     if st.button("Delete", key=f"del_{subj}_{item['name']}"):
                         p.unlink(missing_ok=True)
-                        meta["files"] = [
-                            x for x in meta["files"]
-                            if not (x["subject"] == subj and x["name"] == item["name"])
-                        ]
+                        meta["files"] = [x for x in meta["files"] if not (x["subject"] == subj and x["name"] == item["name"])]
                         save_meta(meta)
                         if st.session_state.preview_path == str(p):
                             st.session_state.preview_path = ""
@@ -324,7 +321,7 @@ else:
                         st.session_state.preview_subject = subj
                         st.rerun()
 
-# Big preview area (accessible)
+# Preview section
 if st.session_state.preview_path:
     p = Path(st.session_state.preview_path)
     if p.exists():
@@ -344,8 +341,6 @@ if st.session_state.preview_path:
         with tab1:
             if p.suffix.lower() == ".pdf":
                 pdf_bytes = p.read_bytes()
-
-                # Always provide download fallback (works everywhere)
                 st.download_button(
                     "⬇️ Download PDF",
                     data=pdf_bytes,
@@ -354,25 +349,20 @@ if st.session_state.preview_path:
                     key=f"prev_dl_{p.name}",
                 )
 
-                # Try inline viewer (often works on desktop; may be blank on some phones)
-                if len(pdf_bytes) <= 8_000_000:
-                    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-                    st.markdown(
-                        f"""
-                        <iframe
-                            src="data:application/pdf;base64,{b64}"
-                            width="100%"
-                            height="650"
-                            style="border:none;">
-                        </iframe>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                if PDF_RENDER_OK:
+                    st.caption("Showing first pages as images (works on all devices).")
+                    try:
+                        doc = fitz.open(str(p))
+                        max_pages = min(5, doc.page_count)
+                        for i in range(max_pages):
+                            page = doc.load_page(i)
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # higher quality
+                            st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {i+1}")
+                        doc.close()
+                    except Exception:
+                        st.warning("Could not render PDF preview. Use Download instead.")
                 else:
-                    st.info("PDF is large. Download to view smoothly.")
-
-                st.caption("If the PDF viewer is blank on mobile, use Download or read Extracted text.")
-
+                    st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
             elif p.suffix.lower() == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=380)
             else:
@@ -385,10 +375,7 @@ if st.session_state.preview_path:
             if p.suffix.lower() in [".txt", ".pdf"]:
                 txt = extract_text_from_path(p)
                 if not txt.strip():
-                    if p.suffix.lower() == ".pdf" and not PDF_OK:
-                        st.warning("PDF text extraction needs pypdf in requirements.txt.")
-                    else:
-                        st.warning("No text extracted from this file.")
+                    st.warning("No text extracted. (PDF text extraction needs pypdf; scanned PDFs may have no text.)")
                 else:
                     st.text_area("Extracted text", txt, height=380)
             else:
@@ -396,30 +383,29 @@ if st.session_state.preview_path:
 
 
 # -----------------------------
-# Update Plan (gate)
+# Update Plan gate
 # -----------------------------
 st.divider()
 if st.button("✅ Update Plan"):
     st.session_state.plan_ready = True
 
 if not st.session_state.plan_ready:
-    st.info("Tap **Update Plan** to compute schedule, timer logging, and AI assessments.")
+    st.info("Tap **Update Plan** to compute schedule, timer logging, and assessments.")
     st.stop()
 
-# Persist latest edits
-df = edited_df.copy()
-st.session_state.subjects = df
-save_df(df)
+# Save edits
+df0 = edited_df.copy()
+st.session_state.subjects = df0
+save_df(df0)
 
 
 # -----------------------------
-# Compute (priority)
+# Compute plan
 # -----------------------------
 df = st.session_state.subjects.copy()
 df = df.dropna(subset=["Subject"])
 df["Subject"] = df["Subject"].astype(str).str.strip()
 df = df[df["Subject"] != ""]
-
 if df.empty:
     st.warning("Add at least one subject.")
     st.stop()
@@ -432,7 +418,6 @@ df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], e
 
 exam_ts = pd.to_datetime(df["Exam Date"], errors="coerce").fillna(pd.Timestamp(today))
 df["Exam Date"] = exam_ts.dt.date
-
 df["Days Left"] = exam_ts.dt.date.apply(lambda d: max(1, (d - today).days)).astype(int)
 df["Urgency"] = 10 / df["Days Left"]
 df["Priority"] = (df["Difficulty (1-5)"] * df["Urgency"]).fillna(0)
@@ -447,35 +432,27 @@ df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested
 
 
 # -----------------------------
-# Focus Timer (auto-log)
+# Focus Timer
 # -----------------------------
 st.subheader("⏱ Focus Timer (auto-logs minutes)")
-
 subjects_list = df["Subject"].astype(str).tolist()
 
 if not st.session_state.timer_running:
-    if subjects_list:
-        chosen = st.selectbox("Choose subject", subjects_list, key="timer_subject_select")
-        mins = st.number_input(
-            "Minutes (use 1–3 minutes for demo)",
-            min_value=1, max_value=120, value=int(st.session_state.timer_minutes),
-        )
-
-        t1, t2 = st.columns(2)
-        with t1:
-            if st.button("▶ Start Timer"):
-                st.session_state.timer_running = True
-                st.session_state.timer_subject = str(chosen)
-                st.session_state.timer_minutes = int(mins)
-                st.session_state.timer_start = time.time()
-                st.session_state.timer_end = st.session_state.timer_start + (int(mins) * 60)
-                st.rerun()
-        with t2:
-            if st.button("🛑 Cancel"):
-                st.session_state.timer_running = False
-                st.rerun()
-    else:
-        st.info("Add at least 1 subject first.")
+    chosen = st.selectbox("Choose subject", subjects_list, key="timer_subject_select")
+    mins = st.number_input("Minutes (use 1–3 for demo)", 1, 120, int(st.session_state.timer_minutes))
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.button("▶ Start Timer"):
+            st.session_state.timer_running = True
+            st.session_state.timer_subject = str(chosen)
+            st.session_state.timer_minutes = int(mins)
+            st.session_state.timer_start = time.time()
+            st.session_state.timer_end = st.session_state.timer_start + int(mins) * 60
+            st.rerun()
+    with t2:
+        if st.button("🛑 Cancel"):
+            st.session_state.timer_running = False
+            st.rerun()
 else:
     remaining = int(st.session_state.timer_end - time.time())
     planned = int(st.session_state.timer_minutes)
@@ -519,43 +496,22 @@ else:
         time.sleep(1)
         st.rerun()
 
-# Recompute after timer updates
-df = load_df()
-df["Exam Date"] = pd.to_datetime(df["Exam Date"], errors="coerce").dt.date
-df = df.dropna(subset=["Subject"])
-df["Subject"] = df["Subject"].astype(str).str.strip()
-df = df[df["Subject"] != ""]
-df["Difficulty (1-5)"] = pd.to_numeric(df["Difficulty (1-5)"], errors="coerce").fillna(0)
-df["Minutes Done (this week)"] = pd.to_numeric(df["Minutes Done (this week)"], errors="coerce").fillna(0)
-
-exam_ts = pd.to_datetime(df["Exam Date"], errors="coerce").fillna(pd.Timestamp(today))
-df["Exam Date"] = exam_ts.dt.date
-df["Days Left"] = exam_ts.dt.date.apply(lambda d: max(1, (d - today).days)).astype(int)
-df["Urgency"] = 10 / df["Days Left"]
-df["Priority"] = (df["Difficulty (1-5)"] * df["Urgency"]).fillna(0)
-total_priority = float(df["Priority"].sum())
-if total_priority <= 0:
-    df["Minutes/Week (Suggested)"] = 0
-else:
-    df["Minutes/Week (Suggested)"] = ((df["Priority"] / total_priority) * weekly_minutes).fillna(0).round().astype(int)
-df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested)"]).fillna(0).clip(0, 1)
-
 
 # -----------------------------
-# AI Assessment (Groq) — robust JSON + smaller notes
+# Assessments: user answers first, AI checks later
 # -----------------------------
-st.subheader("🧠 Assessment Generator (Groq AI)")
+st.subheader("🧠 Assessment (Answer first → AI checks later)")
 
 groq_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 ai_available = bool(groq_key) and GROQ_OK
 
 if not ai_available:
-    st.warning("AI assessment is OFF. Add GROQ_API_KEY in Streamlit Secrets and include 'groq' in requirements.txt.")
+    st.warning("Assessment AI is OFF. Add GROQ_API_KEY in Streamlit Secrets and include 'groq' in requirements.txt.")
 else:
     client = Groq(api_key=groq_key)
 
     if not subjects_clean:
-        st.info("Add subjects first and upload notes to generate assessments.")
+        st.info("Add subjects first and upload notes to create assessments.")
     else:
         assess_subject = st.selectbox("Subject", subjects_clean, key="assess_subject_groq")
 
@@ -571,93 +527,175 @@ else:
             st.warning("Upload at least one TXT or PDF notes file for this subject.")
         else:
             chosen_file = st.selectbox("Notes file", [p.name for p in subject_paths], key="assess_file_groq")
-            p = next(x for x in subject_paths if x.name == chosen_file)
+            pfile = next(x for x in subject_paths if x.name == chosen_file)
 
-            notes_text = normalize_spaces(extract_text_from_path(p))
+            notes_text = normalize_spaces(extract_text_from_path(pfile))
             if not notes_text:
-                st.warning("No text extracted from this file. Try TXT or a different PDF.")
+                st.warning("No text extracted (scanned PDF = no text). Try TXT or different PDF.")
             else:
-                n_items = st.slider("Questions per type", 3, 10, 5)
-                difficulty = st.select_slider("Difficulty", options=["easy", "medium", "hard"], value="medium")
+                st.caption("Step 1: Generate quiz. Step 2: Answer. Step 3: AI checks your answers.")
+                n_items = st.slider("Number of questions", 5, 20, 10)
+                difficulty = st.select_slider("Difficulty", ["easy", "medium", "hard"], value="medium")
 
-                with st.expander("Preview notes used for AI (first 1200 chars)", expanded=False):
-                    st.text_area("Notes", notes_text[:1200], height=200)
-
-                if st.button("✅ Generate ALL (MCQ + Identification + Fill + Short Answer)"):
-                    # keep smaller to reduce hallucinations + improve JSON
-                    notes_limited = notes_text[:6000]
+                # Generate quiz
+                if st.button("🧩 Generate Quiz"):
+                    notes_limited = notes_text[:5500]
 
                     prompt = f"""
-Return ONLY JSON. No explanations, no markdown, no extra words.
+Return ONLY JSON. No markdown. No extra text.
 
 Schema:
 {{
-  "mcq": [{{"question":"...","A":"...","B":"...","C":"...","D":"...","answer_key":"A"}}],
-  "identification": [{{"question":"...","answer_key":"..."}}],
-  "fill_blanks": [{{"question":"... _____ ...","answer_key":"..."}}],
-  "short_answer": [{{"question":"...","answer_key":"..."}}]
+  "questions":[
+    {{
+      "id":"Q1",
+      "type":"mcq|identification|fill_blanks|short_answer",
+      "question":"...",
+      "choices":{{"A":"...","B":"...","C":"...","D":"..."}} (only for mcq),
+      "answer_key":"A" (for mcq) OR "expected answer text" (for others)
+    }}
+  ]
 }}
 
 Rules:
 - Use ONLY the notes.
-- MCQ answer_key must be one of A/B/C/D.
-- Fill blanks must contain EXACTLY ONE blank: "_____".
-- Keep questions aligned to Grade 12 STEM.
-
+- Mix types: include at least 3 different types.
+- For fill_blanks: question must contain exactly ONE blank: "_____" and answer_key is the missing word/phrase.
+- For short_answer/identification: answer_key should be a short correct answer (1–2 sentences max).
+- Make {n_items} questions total.
+- Grade level: Grade 12 STEM.
 Subject: {assess_subject}
 Difficulty: {difficulty}
-Items per type: {n_items}
 
 NOTES:
 {notes_limited}
 """
-
                     try:
-                        kwargs = dict(
+                        chat = client.chat.completions.create(
                             model="llama-3.3-70b-versatile",
                             messages=[
-                                {"role": "system", "content": "You output valid JSON only. No extra text."},
+                                {"role": "system", "content": "You output valid JSON only."},
                                 {"role": "user", "content": prompt},
                             ],
                             temperature=0.0,
                         )
-                        # try to force JSON if supported
-                        try:
-                            kwargs["response_format"] = {"type": "json_object"}
-                        except Exception:
-                            pass
-
-                        chat = client.chat.completions.create(**kwargs)
                         raw = (chat.choices[0].message.content or "").strip()
+                        quiz = parse_json_loose(raw)
+                        if not isinstance(quiz, dict) or "questions" not in quiz:
+                            raise ValueError("Bad quiz format")
+                        st.session_state.quiz = quiz
+                        st.session_state.quiz_subject = assess_subject
+                        st.session_state.quiz_file = chosen_file
+                        st.session_state.user_answers = {}
+                        st.success("Quiz generated! Scroll down to answer.")
                     except Exception:
-                        st.error("Groq request failed. Check GROQ_API_KEY in Secrets.")
-                        st.stop()
+                        st.error("Quiz generation failed (non-JSON). Try again or use cleaner notes.")
+                        st.text_area("Raw output", raw if "raw" in locals() else "", height=220)
 
-                    try:
-                        data = parse_json_loose(raw)
-                    except Exception:
-                        st.error("AI returned non-JSON. Showing raw output for debugging.")
-                        st.text_area("Raw output", raw, height=260)
-                        st.stop()
+                # Show quiz + answer inputs
+                if st.session_state.quiz and st.session_state.quiz_subject == assess_subject:
+                    quiz = st.session_state.quiz
+                    questions = quiz.get("questions", [])
 
-                    def show_section(title: str, items: list):
-                        st.markdown(f"### {title}")
-                        if not items:
-                            st.info("No items generated.")
-                            return
-                        out_df = pd.DataFrame(items)
-                        st.dataframe(out_df, use_container_width=True, hide_index=True)
-                        st.download_button(
-                            f"⬇️ Download {title} (CSV)",
-                            data=out_df.to_csv(index=False).encode("utf-8"),
-                            file_name=f"{safe_code}_{assess_subject}_{title.replace(' ','_').lower()}.csv",
-                            mime="text/csv",
-                        )
+                    st.divider()
+                    st.subheader("✍️ Answer the quiz")
 
-                    show_section("Multiple Choice", data.get("mcq", []))
-                    show_section("Identification", data.get("identification", []))
-                    show_section("Fill in the Blanks", data.get("fill_blanks", []))
-                    show_section("Short Answer", data.get("short_answer", []))
+                    for q in questions:
+                        qid = q.get("id", "")
+                        qtype = q.get("type", "")
+                        qtext = q.get("question", "")
+                        st.markdown(f"**{qid} ({qtype})**")
+                        st.write(qtext)
+
+                        if qtype == "mcq":
+                            choices = q.get("choices", {})
+                            options = []
+                            for k in ["A","B","C","D"]:
+                                if k in choices:
+                                    options.append(f"{k}) {choices[k]}")
+                            pick = st.radio("Your answer", options, key=f"ans_{qid}", index=0 if options else 0)
+                            st.session_state.user_answers[qid] = pick[:1] if pick else ""
+                        else:
+                            ans = st.text_area("Your answer", key=f"ans_{qid}", height=90)
+                            st.session_state.user_answers[qid] = ans.strip()
+
+                        st.write("---")
+
+                    # Grade button
+                    if st.button("✅ Check my answers (AI)"):
+                        # Build grading payload WITHOUT showing keys to user
+                        payload = []
+                        for q in questions:
+                            qid = q.get("id", "")
+                            payload.append({
+                                "id": qid,
+                                "type": q.get("type", ""),
+                                "question": q.get("question", ""),
+                                "choices": q.get("choices", {}),
+                                "expected": q.get("answer_key", ""),
+                                "user_answer": st.session_state.user_answers.get(qid, "")
+                            })
+
+                        grade_prompt = f"""
+Return ONLY JSON.
+
+Schema:
+{{
+  "total_score": <number>,
+  "max_score": <number>,
+  "results": [
+    {{
+      "id":"Q1",
+      "score": <0..1 for mcq, 0..2 for others>,
+      "max_score": <number>,
+      "correct": true/false,
+      "feedback":"short helpful feedback",
+      "suggestion":"what to review"
+    }}
+  ]
+}}
+
+Rules:
+- For MCQ: max_score=1, correct only if user_answer matches expected letter.
+- For non-MCQ: max_score=2, grade for correctness + completeness.
+- Be strict but fair. Feedback must be short and useful.
+- Use expected answers and notes context. Do not invent facts beyond notes.
+
+Subject: {assess_subject}
+
+DATA (questions, expected answers, and user answers):
+{json.dumps(payload, ensure_ascii=False)[:12000]}
+"""
+                        try:
+                            chat2 = client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=[
+                                    {"role": "system", "content": "You output valid JSON only."},
+                                    {"role": "user", "content": grade_prompt},
+                                ],
+                                temperature=0.0,
+                            )
+                            raw2 = (chat2.choices[0].message.content or "").strip()
+                            graded = parse_json_loose(raw2)
+
+                            st.subheader("📊 Results")
+                            st.write(f"Score: **{graded.get('total_score')} / {graded.get('max_score')}**")
+
+                            res = graded.get("results", [])
+                            if isinstance(res, list) and res:
+                                out_df = pd.DataFrame(res)
+                                st.dataframe(out_df, use_container_width=True, hide_index=True)
+                                st.download_button(
+                                    "⬇️ Download grading (CSV)",
+                                    data=out_df.to_csv(index=False).encode("utf-8"),
+                                    file_name=f"{safe_code}_{assess_subject}_grading.csv",
+                                    mime="text/csv",
+                                )
+                            else:
+                                st.warning("No detailed results returned.")
+                        except Exception:
+                            st.error("AI grading failed (non-JSON). Showing raw output.")
+                            st.text_area("Raw output", raw2 if "raw2" in locals() else "", height=240)
 
 
 # -----------------------------
@@ -710,4 +748,4 @@ for i in range(days_to_plan):
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ Preview is a big section below the file list (easier on mobile).")
+st.caption("✅ PDF preview renders pages as images (pymupdf). Assessment: you answer first, then AI checks.")
