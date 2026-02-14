@@ -7,7 +7,6 @@ import json
 import re
 import os
 import base64
-import streamlit.components.v1 as components
 
 # Optional PDF text extraction
 try:
@@ -16,8 +15,7 @@ try:
 except Exception:
     PDF_OK = False
 
-# Optional Groq AI
-GROQ_OK = False
+# Groq client
 try:
     from groq import Groq
     GROQ_OK = True
@@ -29,9 +27,9 @@ except Exception:
 # Config
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
-
 st.title("📚 Smart Study Planner")
 st.caption("Planner + Timer + Study Files + AI Assessments (Groq)")
+
 
 # -----------------------------
 # Profile (Per-user)
@@ -48,7 +46,7 @@ META_PATH = FILES_DIR / "files_meta.json"
 
 
 # -----------------------------
-# Helpers: data
+# Helpers: Data save/load
 # -----------------------------
 def default_df() -> pd.DataFrame:
     t = date.today()
@@ -85,8 +83,12 @@ def nice_date(d) -> str:
 def sanitize_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_")
 
+def now_str() -> str:
+    return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+
+
 # -----------------------------
-# Helpers: files meta
+# Helpers: File meta
 # -----------------------------
 def load_meta() -> dict:
     if META_PATH.exists():
@@ -99,11 +101,9 @@ def load_meta() -> dict:
 def save_meta(meta: dict) -> None:
     META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-def now_str() -> str:
-    return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 
 # -----------------------------
-# Helpers: extract text
+# Helpers: Text extraction + robust JSON parsing
 # -----------------------------
 def extract_text_from_path(p: Path) -> str:
     suf = p.suffix.lower()
@@ -123,6 +123,22 @@ def extract_text_from_path(p: Path) -> str:
 def normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
+def parse_json_loose(raw: str):
+    raw = (raw or "").strip()
+    # 1) direct parse
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    # 2) try extract first {...}
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        snippet = raw[start:end + 1]
+        return json.loads(snippet)
+    raise ValueError("No JSON object found")
+
+
 # -----------------------------
 # Session init
 # -----------------------------
@@ -133,7 +149,7 @@ if "active_user_code" not in st.session_state or st.session_state.active_user_co
 if "plan_ready" not in st.session_state:
     st.session_state.plan_ready = False
 
-# timer state
+# Timer state
 if "timer_running" not in st.session_state:
     st.session_state.timer_running = False
 if "timer_subject" not in st.session_state:
@@ -145,7 +161,7 @@ if "timer_start" not in st.session_state:
 if "timer_end" not in st.session_state:
     st.session_state.timer_end = 0.0
 
-# file preview state (for better UX)
+# Preview state
 if "preview_path" not in st.session_state:
     st.session_state.preview_path = ""
 if "preview_name" not in st.session_state:
@@ -155,7 +171,7 @@ if "preview_subject" not in st.session_state:
 
 
 # -----------------------------
-# Settings (mobile-friendly)
+# Settings
 # -----------------------------
 with st.expander("⚙️ Settings", expanded=False):
     minutes_per_day = st.number_input("Minutes available per day", 30, 600, 180, 10)
@@ -260,7 +276,7 @@ with st.expander("Upload study files", expanded=False):
                 st.success(f"Saved {added} file(s) under {tag_subject}.")
                 st.rerun()
 
-# File browser grouped by subject
+# Browser grouped by subject
 if not meta.get("files"):
     st.info("No study files yet. Upload notes above.")
 else:
@@ -296,7 +312,6 @@ else:
                             if not (x["subject"] == subj and x["name"] == item["name"])
                         ]
                         save_meta(meta)
-                        # close preview if it was this file
                         if st.session_state.preview_path == str(p):
                             st.session_state.preview_path = ""
                             st.session_state.preview_name = ""
@@ -309,7 +324,7 @@ else:
                         st.session_state.preview_subject = subj
                         st.rerun()
 
-# Big preview area (more accessible)
+# Big preview area (accessible)
 if st.session_state.preview_path:
     p = Path(st.session_state.preview_path)
     if p.exists():
@@ -328,27 +343,39 @@ if st.session_state.preview_path:
 
         with tab1:
             if p.suffix.lower() == ".pdf":
-                # Embed PDF viewer (mobile-friendly)
                 pdf_bytes = p.read_bytes()
-                # Avoid embedding huge PDFs (can be slow)
-                if len(pdf_bytes) > 8_000_000:
-                    st.warning("PDF is large. Use Download for smoother viewing.")
-                else:
+
+                # Always provide download fallback (works everywhere)
+                st.download_button(
+                    "⬇️ Download PDF",
+                    data=pdf_bytes,
+                    file_name=p.name,
+                    mime="application/pdf",
+                    key=f"prev_dl_{p.name}",
+                )
+
+                # Try inline viewer (often works on desktop; may be blank on some phones)
+                if len(pdf_bytes) <= 8_000_000:
                     b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-                    pdf_display = f"""
-                    <iframe
-                        src="data:application/pdf;base64,{b64}"
-                        width="100%"
-                        height="600"
-                        style="border: none;">
-                    </iframe>
-                    """
-                    components.html(pdf_display, height=620)
+                    st.markdown(
+                        f"""
+                        <iframe
+                            src="data:application/pdf;base64,{b64}"
+                            width="100%"
+                            height="650"
+                            style="border:none;">
+                        </iframe>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info("PDF is large. Download to view smoothly.")
+
+                st.caption("If the PDF viewer is blank on mobile, use Download or read Extracted text.")
 
             elif p.suffix.lower() == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=380)
             else:
-                # images
                 try:
                     st.image(str(p), use_container_width=True)
                 except Exception:
@@ -379,10 +406,11 @@ if not st.session_state.plan_ready:
     st.info("Tap **Update Plan** to compute schedule, timer logging, and AI assessments.")
     st.stop()
 
-# Persist the latest edits (so timer/plan use updated table)
+# Persist latest edits
 df = edited_df.copy()
 st.session_state.subjects = df
 save_df(df)
+
 
 # -----------------------------
 # Compute (priority)
@@ -491,7 +519,7 @@ else:
         time.sleep(1)
         st.rerun()
 
-# Recompute df after timer updates
+# Recompute after timer updates
 df = load_df()
 df["Exam Date"] = pd.to_datetime(df["Exam Date"], errors="coerce").dt.date
 df = df.dropna(subset=["Subject"])
@@ -514,16 +542,11 @@ df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested
 
 
 # -----------------------------
-# AI Assessment (Groq)
+# AI Assessment (Groq) — robust JSON + smaller notes
 # -----------------------------
-st.subheader("🧠 Assessment Generator (AI from your notes)")
+st.subheader("🧠 Assessment Generator (Groq AI)")
 
-groq_key = None
-if "GROQ_API_KEY" in st.secrets:
-    groq_key = st.secrets["GROQ_API_KEY"]
-else:
-    groq_key = os.environ.get("GROQ_API_KEY")
-
+groq_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 ai_available = bool(groq_key) and GROQ_OK
 
 if not ai_available:
@@ -536,7 +559,6 @@ else:
     else:
         assess_subject = st.selectbox("Subject", subjects_clean, key="assess_subject_groq")
 
-        # gather notes files for this subject
         meta = load_meta()
         subject_paths = []
         for item in meta.get("files", []):
@@ -562,13 +584,25 @@ else:
                     st.text_area("Notes", notes_text[:1200], height=200)
 
                 if st.button("✅ Generate ALL (MCQ + Identification + Fill + Short Answer)"):
-                    notes_limited = notes_text[:9000]
+                    # keep smaller to reduce hallucinations + improve JSON
+                    notes_limited = notes_text[:6000]
 
                     prompt = f"""
-Return ONLY valid JSON with keys: mcq, identification, fill_blanks, short_answer.
-Each item must include: question, answer_key.
-MCQ must include choices A,B,C,D and answer_key must be one of A/B/C/D.
-Fill blanks must contain exactly ONE blank '_____' in the question.
+Return ONLY JSON. No explanations, no markdown, no extra words.
+
+Schema:
+{{
+  "mcq": [{{"question":"...","A":"...","B":"...","C":"...","D":"...","answer_key":"A"}}],
+  "identification": [{{"question":"...","answer_key":"..."}}],
+  "fill_blanks": [{{"question":"... _____ ...","answer_key":"..."}}],
+  "short_answer": [{{"question":"...","answer_key":"..."}}]
+}}
+
+Rules:
+- Use ONLY the notes.
+- MCQ answer_key must be one of A/B/C/D.
+- Fill blanks must contain EXACTLY ONE blank: "_____".
+- Keep questions aligned to Grade 12 STEM.
 
 Subject: {assess_subject}
 Difficulty: {difficulty}
@@ -579,24 +613,31 @@ NOTES:
 """
 
                     try:
-                        chat = client.chat.completions.create(
+                        kwargs = dict(
                             model="llama-3.3-70b-versatile",
                             messages=[
-                                {"role": "system", "content": "You are a strict Grade 12 STEM teacher. Use ONLY the notes given."},
+                                {"role": "system", "content": "You output valid JSON only. No extra text."},
                                 {"role": "user", "content": prompt},
                             ],
-                            temperature=0.2,
+                            temperature=0.0,
                         )
+                        # try to force JSON if supported
+                        try:
+                            kwargs["response_format"] = {"type": "json_object"}
+                        except Exception:
+                            pass
+
+                        chat = client.chat.completions.create(**kwargs)
                         raw = (chat.choices[0].message.content or "").strip()
-                    except Exception as e:
+                    except Exception:
                         st.error("Groq request failed. Check GROQ_API_KEY in Secrets.")
                         st.stop()
 
                     try:
-                        data = json.loads(raw)
+                        data = parse_json_loose(raw)
                     except Exception:
-                        st.error("AI returned non-JSON. Try again or use a shorter/cleaner notes file.")
-                        st.text_area("Raw output", raw, height=250)
+                        st.error("AI returned non-JSON. Showing raw output for debugging.")
+                        st.text_area("Raw output", raw, height=260)
                         st.stop()
 
                     def show_section(title: str, items: list):
@@ -651,7 +692,6 @@ for _, row in df.sort_values("Minutes/Week (Suggested)", ascending=False).iterro
     st.progress(float(row["Progress %"]))
 
 st.subheader("5) Study Plan")
-
 ranked = df.sort_values("Minutes/Week (Suggested)", ascending=False).reset_index(drop=True)
 top = ranked.head(min(3, len(ranked))).copy()
 
@@ -666,10 +706,8 @@ plan_rows = []
 for i in range(days_to_plan):
     day_label = (pd.Timestamp(today) + pd.Timedelta(days=i)).strftime("%b %d, %Y")
     for idx in range(len(top)):
-        plan_rows.append(
-            {"Day": day_label, "Subject": top.loc[idx, "Subject"], "Minutes": int(round(minutes_per_day * split[idx]))}
-        )
+        plan_rows.append({"Day": day_label, "Subject": top.loc[idx, "Subject"], "Minutes": int(round(minutes_per_day * split[idx]))})
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ Preview is now a big section below the file list (easier on mobile).")
+st.caption("✅ Preview is a big section below the file list (easier on mobile).")
