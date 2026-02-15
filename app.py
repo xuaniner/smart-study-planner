@@ -609,7 +609,8 @@ if st.session_state.preview_path:
                     st.text_area("Extracted text", txt, height=380)
             else:
                 st.info("Text extraction is available for TXT/PDF/PPTX only.")
-with tab3:
+                
+        with tab3:
     suf = p.suffix.lower()
 
     if suf == ".pdf":
@@ -632,7 +633,6 @@ with tab3:
 
     else:
         st.info("Image extraction is available for PDF and PPTX. For image files (PNG/JPG), use the View tab.")
-
 
 # -----------------------------
 # Update Plan gate
