@@ -579,13 +579,45 @@ if st.session_state.preview_path:
                     st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
 
             elif suf == ".pptx":
-                st.download_button(
-                    "⬇️ Download PPTX",
-                    data=p.read_bytes(),
-                    file_name=p.name,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    key=f"prev_dl_pptx_{p.name}",
+    st.download_button(
+        "⬇️ Download PPTX",
+        data=p.read_bytes(),
+        file_name=p.name,
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        key=f"prev_dl_pptx_{p.name}",
+    )
+
+    if not PPTX_OK:
+        st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
+    else:
+        # Controls so it won't overwhelm mobile/desktop
+        show_text = st.toggle("Show slide text", value=True, key=f"pptx_show_text_{p.name}")
+        show_images = st.toggle("Show images", value=True, key=f"pptx_show_images_{p.name}")
+
+        max_slides = st.slider("Slides to scan", 1, 150, 30, key=f"pptx_view_maxslides_{p.name}")
+
+        if show_text:
+            txt = extract_text_from_pptx(p, max_slides=int(max_slides))
+            if txt.strip():
+                st.text_area("Slide text", txt, height=320)
+            else:
+                st.info("No slide text found (maybe mostly images).")
+
+        if show_images:
+            max_imgs = st.slider("Max images to show", 5, 300, 50, key=f"pptx_view_maximgs_{p.name}")
+            imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
+
+            if not imgs:
+                st.info("No embedded images found in this PPTX.")
+            else:
+                # Gallery directly inside View file
+                st.markdown("### 🖼 Images in slides")
+                render_image_gallery(
+                    imgs,
+                    label_key="slide",
+                    file_key_prefix=f"view_pptx_{p.name}",
                 )
+
 
                 if PPTX_OK:
                     txt = extract_text_from_pptx(p, max_slides=50)
