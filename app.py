@@ -7,6 +7,8 @@ import json
 import re
 import os
 import io
+import mimetypes
+
 
 # PDF text extraction
 try:
@@ -221,6 +223,115 @@ def extract_text_smart(p: Path) -> str:
         return txt
 
     return ""
+def extract_images_from_pdf(p: Path, max_pages: int = 10, max_images: int = 30) -> list[dict]:
+    """
+    Returns list of dicts: {name, bytes, ext, page}
+    Extracts embedded raster images from PDF using PyMuPDF.
+    """
+    if not PDF_RENDER_OK or p.suffix.lower() != ".pdf":
+        return []
+
+    images = []
+    try:
+        doc = fitz.open(str(p))
+        pages = min(doc.page_count, max_pages)
+
+        for page_index in range(pages):
+            page = doc.load_page(page_index)
+            img_list = page.get_images(full=True)  # list of tuples with xref
+            for j, img in enumerate(img_list):
+                if len(images) >= max_images:
+                    break
+                xref = img[0]
+                base = doc.extract_image(xref)
+                img_bytes = base.get("image", b"")
+                ext = (base.get("ext") or "png").lower()
+
+                if img_bytes:
+                    images.append({
+                        "name": f"page{page_index+1}_img{j+1}.{ext}",
+                        "bytes": img_bytes,
+                        "ext": ext,
+                        "page": page_index + 1,
+                    })
+
+            if len(images) >= max_images:
+                break
+
+        doc.close()
+    except Exception:
+        return []
+
+    return images
+def extract_images_from_pptx(p: Path, max_slides: int = 30, max_images: int = 50) -> list[dict]:
+    """
+    Returns list of dicts: {name, bytes, ext, slide}
+    Extracts embedded pictures from PPTX using python-pptx.
+    """
+    if not PPTX_OK or p.suffix.lower() != ".pptx":
+        return []
+
+    images = []
+    try:
+        prs = Presentation(str(p))
+        for si, slide in enumerate(prs.slides):
+            if si >= max_slides:
+                break
+
+            for shape in slide.shapes:
+                if len(images) >= max_images:
+                    break
+
+                # Only picture shapes have .image
+                if getattr(shape, "image", None) is None:
+                    continue
+
+                blob = shape.image.blob
+                ext = (shape.image.ext or "png").lower()
+                images.append({
+                    "name": f"slide{si+1}_img{len(images)+1}.{ext}",
+                    "bytes": blob,
+                    "ext": ext,
+                    "slide": si + 1,
+                })
+
+            if len(images) >= max_images:
+                break
+    except Exception:
+        return []
+
+    return images
+def render_image_gallery(items: list[dict], label_key: str):
+    """
+    items: list of dicts having bytes + name + label_key ("page" or "slide")
+    label_key: "page" or "slide"
+    """
+    if not items:
+        st.info("No embedded images found.")
+        return
+
+    # Keep it not overwhelming
+    cols_per_row = 2 if st.session_state.get("_is_mobile", False) else 3
+
+    st.caption(f"Found {len(items)} image(s). Showing as a gallery.")
+    for i in range(0, len(items), cols_per_row):
+        row = st.columns(cols_per_row)
+        for k in range(cols_per_row):
+            idx = i + k
+            if idx >= len(items):
+                break
+            it = items[idx]
+            with row[k]:
+                st.image(it["bytes"], use_container_width=True)
+                tag = it.get(label_key, "")
+                st.caption(f"{it['name']} ({label_key} {tag})")
+                st.download_button(
+                    "Download image",
+                    data=it["bytes"],
+                    file_name=it["name"],
+                    mime=mimetypes.guess_type(it["name"])[0] or "application/octet-stream",
+                    key=f"imgdl_{label_key}_{it['name']}_{idx}",
+                )
 
 
 # -----------------------------
@@ -268,8 +379,11 @@ if "user_answers" not in st.session_state:
 # Settings
 # -----------------------------
 with st.expander("⚙️ Settings", expanded=False):
+    is_mobile = st.toggle("Mobile mode (bigger UI, fewer columns)", value=False)
+    st.session_state["_is_mobile"] = bool(is_mobile)
     minutes_per_day = st.number_input("Minutes available per day", 30, 600, 180, 10)
     days_to_plan = st.slider("Plan length (days)", 3, 14, 7)
+
 
 
 # -----------------------------
@@ -425,7 +539,7 @@ if st.session_state.preview_path:
                 st.session_state.preview_subject = ""
                 st.rerun()
 
-        tab1, tab2 = st.tabs(["📄 View file", "📝 Extracted text"])
+        tab1, tab2, tab3 = st.tabs(["📄 View file", "📝 Extracted text", "🖼 Images"])
 
         with tab1:
             suf = p.suffix.lower()
@@ -495,6 +609,29 @@ if st.session_state.preview_path:
                     st.text_area("Extracted text", txt, height=380)
             else:
                 st.info("Text extraction is available for TXT/PDF/PPTX only.")
+with tab3:
+    suf = p.suffix.lower()
+
+    if suf == ".pdf":
+        if not PDF_RENDER_OK:
+            st.warning("PDF image extraction needs pymupdf.")
+        else:
+            max_pages = st.slider("Scan pages for images", 1, 50, 10)
+            max_imgs = st.slider("Max images to show", 5, 200, 30)
+            imgs = extract_images_from_pdf(p, max_pages=max_pages, max_images=max_imgs)
+            render_image_gallery(imgs, label_key="page")
+
+    elif suf == ".pptx":
+        if not PPTX_OK:
+            st.warning("PPTX image extraction needs python-pptx.")
+        else:
+            max_slides = st.slider("Scan slides for images", 1, 100, 30)
+            max_imgs = st.slider("Max images to show", 5, 200, 50)
+            imgs = extract_images_from_pptx(p, max_slides=max_slides, max_images=max_imgs)
+            render_image_gallery(imgs, label_key="slide")
+
+    else:
+        st.info("Image extraction is available for PDF and PPTX. For image files (PNG/JPG), use the View tab.")
 
 
 # -----------------------------
