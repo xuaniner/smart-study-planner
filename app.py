@@ -8,7 +8,11 @@ import re
 import os
 import io
 import mimetypes
+from typing import List, Dict, Any
 
+# -----------------------------
+# Optional libraries
+# -----------------------------
 
 # PDF text extraction
 try:
@@ -17,7 +21,7 @@ try:
 except Exception:
     PDF_OK = False
 
-# PDF rendering (preview as images)
+# PDF rendering + embedded image extraction
 PDF_RENDER_OK = False
 try:
     import fitz  # PyMuPDF
@@ -25,7 +29,7 @@ try:
 except Exception:
     PDF_RENDER_OK = False
 
-# PPTX extraction
+# PPTX parsing (text + embedded images)
 PPTX_OK = False
 try:
     from pptx import Presentation
@@ -33,7 +37,7 @@ try:
 except Exception:
     PPTX_OK = False
 
-# Optional OCR (only used if you already implemented "A")
+# OCR (scanned PDF fallback) — only if you installed pytesseract + pillow + tesseract binary
 OCR_OK = False
 try:
     import pytesseract
@@ -56,7 +60,7 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
 st.title("📚 Smart Study Planner")
-st.caption("Planner + Timer + Study Files + Assessments (Groq)")
+st.caption("From the works of STEM 12 A")
 
 
 # -----------------------------
@@ -114,7 +118,7 @@ def sanitize_name(name: str) -> str:
 def now_str() -> str:
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 
-def load_meta() -> dict:
+def load_meta() -> Dict[str, Any]:
     if META_PATH.exists():
         try:
             return json.loads(META_PATH.read_text(encoding="utf-8"))
@@ -122,7 +126,7 @@ def load_meta() -> dict:
             return {"files": []}
     return {"files": []}
 
-def save_meta(meta: dict) -> None:
+def save_meta(meta: Dict[str, Any]) -> None:
     META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 def normalize_spaces(s: str) -> str:
@@ -141,8 +145,8 @@ def parse_json_loose(raw: str):
     raise ValueError("No JSON object found")
 
 def extract_text_from_pdf_text(p: Path, max_pages: int = 12) -> str:
-    """Extract selectable text from PDF (not OCR)."""
-    if not (p.suffix.lower() == ".pdf" and PDF_OK):
+    """Extract selectable text from PDF using pypdf (no OCR)."""
+    if not (PDF_OK and p.suffix.lower() == ".pdf"):
         return ""
     try:
         reader = PdfReader(str(p))
@@ -155,7 +159,7 @@ def extract_text_from_pdf_text(p: Path, max_pages: int = 12) -> str:
 
 def ocr_pdf_with_pymupdf(p: Path, max_pages: int = 6, zoom: float = 2.0) -> str:
     """OCR scanned PDF pages using PyMuPDF render + pytesseract (optional)."""
-    if not (PDF_RENDER_OK and OCR_OK):
+    if not (PDF_RENDER_OK and OCR_OK and p.suffix.lower() == ".pdf"):
         return ""
     try:
         doc = fitz.open(str(p))
@@ -165,8 +169,7 @@ def ocr_pdf_with_pymupdf(p: Path, max_pages: int = 6, zoom: float = 2.0) -> str:
             page = doc.load_page(i)
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             img = Image.open(io.BytesIO(pix.tobytes("png")))
-            text = pytesseract.image_to_string(img) or ""
-            text = text.strip()
+            text = (pytesseract.image_to_string(img) or "").strip()
             if text:
                 parts.append(f"[Page {i+1}]\n{text}")
         doc.close()
@@ -187,7 +190,7 @@ def extract_text_from_pptx(p: Path, max_slides: int = 50) -> str:
             chunks = []
             for shape in slide.shapes:
                 if hasattr(shape, "text") and shape.text:
-                    t = shape.text.strip()
+                    t = (shape.text or "").strip()
                     if t:
                         chunks.append(t)
             if chunks:
@@ -206,7 +209,7 @@ def extract_text_smart(p: Path) -> str:
 
     if suf == ".txt":
         try:
-            return p.read_text(errors="ignore").strip()
+            return (p.read_text(errors="ignore") or "").strip()
         except Exception:
             return ""
 
@@ -215,7 +218,6 @@ def extract_text_smart(p: Path) -> str:
 
     if suf == ".pdf":
         txt = extract_text_from_pdf_text(p, max_pages=12)
-        # If PDF is scanned, selectable text is often empty/very short
         if len(normalize_spaces(txt)) < 200:
             ocr_txt = ocr_pdf_with_pymupdf(p, max_pages=6, zoom=2.0)
             if ocr_txt:
@@ -223,22 +225,23 @@ def extract_text_smart(p: Path) -> str:
         return txt
 
     return ""
-def extract_images_from_pdf(p: Path, max_pages: int = 10, max_images: int = 30) -> list[dict]:
+
+def extract_images_from_pdf(p: Path, max_pages: int = 10, max_images: int = 30) -> List[Dict[str, Any]]:
     """
-    Returns list of dicts: {name, bytes, ext, page}
-    Extracts embedded raster images from PDF using PyMuPDF.
+    Extract embedded raster images from PDF using PyMuPDF.
+    Returns items: {name, bytes, ext, page}
     """
-    if not PDF_RENDER_OK or p.suffix.lower() != ".pdf":
+    if not (PDF_RENDER_OK and p.suffix.lower() == ".pdf"):
         return []
 
-    images = []
+    images: List[Dict[str, Any]] = []
     try:
         doc = fitz.open(str(p))
         pages = min(doc.page_count, max_pages)
 
         for page_index in range(pages):
             page = doc.load_page(page_index)
-            img_list = page.get_images(full=True)  # list of tuples with xref
+            img_list = page.get_images(full=True)
             for j, img in enumerate(img_list):
                 if len(images) >= max_images:
                     break
@@ -246,74 +249,79 @@ def extract_images_from_pdf(p: Path, max_pages: int = 10, max_images: int = 30) 
                 base = doc.extract_image(xref)
                 img_bytes = base.get("image", b"")
                 ext = (base.get("ext") or "png").lower()
-
                 if img_bytes:
-                    images.append({
-                        "name": f"page{page_index+1}_img{j+1}.{ext}",
-                        "bytes": img_bytes,
-                        "ext": ext,
-                        "page": page_index + 1,
-                    })
-
+                    images.append(
+                        {
+                            "name": f"page{page_index+1}_img{j+1}.{ext}",
+                            "bytes": img_bytes,
+                            "ext": ext,
+                            "page": page_index + 1,
+                        }
+                    )
             if len(images) >= max_images:
                 break
 
         doc.close()
+        return images
     except Exception:
         return []
 
-    return images
-def extract_images_from_pptx(p: Path, max_slides: int = 30, max_images: int = 50) -> list[dict]:
+def extract_images_from_pptx(p: Path, max_slides: int = 30, max_images: int = 50) -> List[Dict[str, Any]]:
     """
-    Returns list of dicts: {name, bytes, ext, slide}
-    Extracts embedded pictures from PPTX using python-pptx.
+    Extract embedded picture shapes from PPTX using python-pptx.
+    Returns items: {name, bytes, ext, slide}
     """
-    if not PPTX_OK or p.suffix.lower() != ".pptx":
+    if not (PPTX_OK and p.suffix.lower() == ".pptx"):
         return []
 
-    images = []
+    images: List[Dict[str, Any]] = []
     try:
         prs = Presentation(str(p))
         for si, slide in enumerate(prs.slides):
             if si >= max_slides:
                 break
-
             for shape in slide.shapes:
                 if len(images) >= max_images:
                     break
 
-                # Only picture shapes have .image
-                if getattr(shape, "image", None) is None:
+                img_obj = getattr(shape, "image", None)
+                if img_obj is None:
                     continue
 
-                blob = shape.image.blob
-                ext = (shape.image.ext or "png").lower()
-                images.append({
-                    "name": f"slide{si+1}_img{len(images)+1}.{ext}",
-                    "bytes": blob,
-                    "ext": ext,
-                    "slide": si + 1,
-                })
-
+                blob = img_obj.blob
+                ext = (img_obj.ext or "png").lower()
+                images.append(
+                    {
+                        "name": f"slide{si+1}_img{len(images)+1}.{ext}",
+                        "bytes": blob,
+                        "ext": ext,
+                        "slide": si + 1,
+                    }
+                )
             if len(images) >= max_images:
                 break
+        return images
     except Exception:
         return []
 
-    return images
-def render_image_gallery(items: list[dict], label_key: str):
+def render_image_gallery(items: List[Dict[str, Any]], label_key: str, file_key_prefix: str):
     """
-    items: list of dicts having bytes + name + label_key ("page" or "slide")
-    label_key: "page" or "slide"
+    items must have: bytes, name, label_key field (page/slide).
+    label_key: 'page' or 'slide'
     """
     if not items:
         st.info("No embedded images found.")
         return
 
-    # Keep it not overwhelming
-    cols_per_row = 2 if st.session_state.get("_is_mobile", False) else 3
+    # Simple, user-controlled density (works on mobile/desktop)
+    cols_per_row = st.select_slider(
+        "Gallery columns",
+        options=[1, 2, 3, 4],
+        value=2,
+        key=f"{file_key_prefix}_cols",
+    )
 
-    st.caption(f"Found {len(items)} image(s). Showing as a gallery.")
+    st.caption(f"Found {len(items)} image(s).")
     for i in range(0, len(items), cols_per_row):
         row = st.columns(cols_per_row)
         for k in range(cols_per_row):
@@ -325,12 +333,14 @@ def render_image_gallery(items: list[dict], label_key: str):
                 st.image(it["bytes"], use_container_width=True)
                 tag = it.get(label_key, "")
                 st.caption(f"{it['name']} ({label_key} {tag})")
+
+                mime = mimetypes.guess_type(it["name"])[0] or "application/octet-stream"
                 st.download_button(
                     "Download image",
                     data=it["bytes"],
                     file_name=it["name"],
-                    mime=mimetypes.guess_type(it["name"])[0] or "application/octet-stream",
-                    key=f"imgdl_{label_key}_{it['name']}_{idx}",
+                    mime=mime,
+                    key=f"{file_key_prefix}_dl_{idx}",
                 )
 
 
@@ -379,11 +389,8 @@ if "user_answers" not in st.session_state:
 # Settings
 # -----------------------------
 with st.expander("⚙️ Settings", expanded=False):
-    is_mobile = st.toggle("Mobile mode (bigger UI, fewer columns)", value=False)
-    st.session_state["_is_mobile"] = bool(is_mobile)
     minutes_per_day = st.number_input("Minutes available per day", 30, 600, 180, 10)
     days_to_plan = st.slider("Plan length (days)", 3, 14, 7)
-
 
 
 # -----------------------------
@@ -418,7 +425,7 @@ edited_df = st.data_editor(
     },
 )
 
-cA, cB, cC = st.columns([1, 1, 2])
+cA, cB, = st.columns([1, 1 ])
 with cA:
     if st.button("💾 Save changes"):
         st.session_state.subjects = edited_df.copy()
@@ -430,9 +437,6 @@ with cB:
         save_df(st.session_state.subjects)
         st.success("Reset done!")
         st.rerun()
-with cC:
-    st.caption("Dates display like: Feb 21, 2026")
-
 subjects_clean = (
     pd.Series(st.session_state.subjects["Subject"])
     .dropna()
@@ -443,7 +447,7 @@ subjects_clean = subjects_clean[subjects_clean != ""].tolist()
 
 
 # -----------------------------
-# Study Files (tagged by subject) + Preview
+# Study Files (tagged by subject)
 # -----------------------------
 st.subheader("📁 Study Files (tagged by subject)")
 meta = load_meta()
@@ -453,13 +457,11 @@ with st.expander("Upload study files", expanded=False):
         st.warning("Add at least 1 subject first so files can be tagged.")
     else:
         tag_subject = st.selectbox("Which subject is this file for?", subjects_clean)
-
         uploads = st.file_uploader(
             "Upload notes (TXT / PDF / PPTX / images)",
             type=["txt", "pdf", "pptx", "png", "jpg", "jpeg"],
             accept_multiple_files=True,
         )
-
         if st.button("⬆️ Save uploaded files"):
             if not uploads:
                 st.warning("No files selected.")
@@ -483,7 +485,7 @@ with st.expander("Upload study files", expanded=False):
 if not meta.get("files"):
     st.info("No study files yet. Upload notes above.")
 else:
-    files_by_subject = {}
+    files_by_subject: Dict[str, List[Dict[str, Any]]] = {}
     for item in meta["files"]:
         files_by_subject.setdefault(item["subject"], []).append(item)
 
@@ -510,7 +512,10 @@ else:
                 with col3:
                     if st.button("Delete", key=f"del_{subj}_{item['name']}"):
                         p.unlink(missing_ok=True)
-                        meta["files"] = [x for x in meta["files"] if not (x["subject"] == subj and x["name"] == item["name"])]
+                        meta["files"] = [
+                            x for x in meta["files"]
+                            if not (x["subject"] == subj and x["name"] == item["name"])
+                        ]
                         save_meta(meta)
                         if st.session_state.preview_path == str(p):
                             st.session_state.preview_path = ""
@@ -524,7 +529,10 @@ else:
                         st.session_state.preview_subject = subj
                         st.rerun()
 
-# Preview section
+
+# -----------------------------
+# Preview section (PDF/PPTX/TXT/Images)
+# -----------------------------
 if st.session_state.preview_path:
     p = Path(st.session_state.preview_path)
     if p.exists():
@@ -541,95 +549,104 @@ if st.session_state.preview_path:
 
         tab1, tab2, tab3 = st.tabs(["📄 View file", "📝 Extracted text", "🖼 Images"])
 
-with tab1:
-    suf = p.suffix.lower()
+        # ---------------- TAB 1 ----------------
+        with tab1:
+            suf = p.suffix.lower()
 
-    if suf == ".pdf":
-        pdf_bytes = p.read_bytes()
-        st.download_button(
-            "⬇️ Download PDF",
-            data=pdf_bytes,
-            file_name=p.name,
-            mime="application/pdf",
-            key=f"prev_dl_{p.name}",
-        )
+            if suf == ".pdf":
+                pdf_bytes = p.read_bytes()
+                st.download_button(
+                    "⬇️ Download PDF",
+                    data=pdf_bytes,
+                    file_name=p.name,
+                    mime="application/pdf",
+                    key=f"prev_dl_pdf_{p.name}",
+                )
 
-        if PDF_RENDER_OK:
-            st.caption("Showing first pages as images (works on all devices).")
-            try:
-                doc = fitz.open(str(p))
-                max_pages = min(5, doc.page_count)
-                for i in range(max_pages):
-                    page = doc.load_page(i)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                    st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {i+1}")
-                doc.close()
-            except Exception:
-                st.warning("Could not render PDF preview. Use Download instead.")
-        else:
-            st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
+                if PDF_RENDER_OK:
+                    st.caption("Showing first pages as images (includes pictures/diagrams).")
+                    try:
+                        doc = fitz.open(str(p))
+                        max_pages = min(5, doc.page_count)
+                        for i in range(max_pages):
+                            page = doc.load_page(i)
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                            st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {i+1}")
+                        doc.close()
+                    except Exception:
+                        st.warning("Could not render PDF preview. Use Download instead.")
+                else:
+                    st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
 
-    elif suf == ".pptx":
-        st.download_button(
-            "⬇️ Download PPTX",
-            data=p.read_bytes(),
-            file_name=p.name,
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            key=f"prev_dl_{p.name}",
-        )
-        if not PPTX_OK:
-            st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
-        else:
-            txt = extract_text_from_pptx(p, max_slides=50)
-            if not txt.strip():
-                st.info("No slide text found (maybe mostly images). Use Download.")
+            elif suf == ".pptx":
+                st.download_button(
+                    "⬇️ Download PPTX",
+                    data=p.read_bytes(),
+                    file_name=p.name,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key=f"prev_dl_pptx_{p.name}",
+                )
+
+                if PPTX_OK:
+                    txt = extract_text_from_pptx(p, max_slides=50)
+                    if not txt.strip():
+                        st.info("No slide text found (maybe mostly images). Check the Images tab.")
+                    else:
+                        st.caption("Previewing extracted slide text (fast + mobile-friendly).")
+                        st.text_area("Slide text preview", txt, height=420)
+                else:
+                    st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
+
+            elif suf == ".txt":
+                st.text_area("Text file", p.read_text(errors="ignore"), height=420)
+
             else:
-                st.caption("Previewing slide text (fast + mobile-friendly).")
-                st.text_area("Slide text preview", txt, height=420)
+                # For PNG/JPG/etc.
+                try:
+                    st.image(str(p), use_container_width=True)
+                except Exception:
+                    st.info("Preview not available. Use Download.")
 
-    elif suf == ".txt":
-        st.text_area("Text file", p.read_text(errors="ignore"), height=380)
+        # ---------------- TAB 2 ----------------
+        with tab2:
+            suf = p.suffix.lower()
+            if suf in [".txt", ".pdf", ".pptx"]:
+                txt = extract_text_smart(p)
+                if not txt.strip():
+                    if suf == ".pdf" and not OCR_OK:
+                        st.warning("No text extracted. If this PDF is scanned, OCR needs pytesseract + tesseract.")
+                    else:
+                        st.warning("No text extracted.")
+                else:
+                    st.text_area("Extracted text", txt, height=420)
+            else:
+                st.info("Text extraction is available for TXT/PDF/PPTX only.")
 
-    else:
-        try:
-            st.image(str(p), use_container_width=True)
-        except Exception:
-            st.info("Preview not available. Use Download.")
+        # ---------------- TAB 3 ----------------
+        with tab3:
+            suf = p.suffix.lower()
 
-with tab2:
-    suf = p.suffix.lower()
-    if suf in [".txt", ".pdf", ".pptx"]:
-        txt = extract_text_smart(p)
-        if not txt.strip():
-            st.warning("No text extracted.")
-        else:
-            st.text_area("Extracted text", txt, height=380)
-    else:
-        st.info("Text extraction is available for TXT/PDF/PPTX only.")
+            if suf == ".pdf":
+                if not PDF_RENDER_OK:
+                    st.warning("PDF image extraction needs pymupdf.")
+                else:
+                    max_pages = st.slider("Scan pages for embedded images", 1, 80, 10, key=f"img_pdf_pages_{p.name}")
+                    max_imgs = st.slider("Max images to show", 5, 300, 30, key=f"img_pdf_max_{p.name}")
+                    imgs = extract_images_from_pdf(p, max_pages=int(max_pages), max_images=int(max_imgs))
+                    render_image_gallery(imgs, label_key="page", file_key_prefix=f"gal_pdf_{p.name}")
 
-with tab3:
-    suf = p.suffix.lower()
+            elif suf == ".pptx":
+                if not PPTX_OK:
+                    st.warning("PPTX image extraction needs python-pptx.")
+                else:
+                    max_slides = st.slider("Scan slides for images", 1, 150, 30, key=f"img_pptx_slides_{p.name}")
+                    max_imgs = st.slider("Max images to show", 5, 300, 50, key=f"img_pptx_max_{p.name}")
+                    imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
+                    render_image_gallery(imgs, label_key="slide", file_key_prefix=f"gal_pptx_{p.name}")
 
-    if suf == ".pdf":
-        if not PDF_RENDER_OK:
-            st.warning("PDF image extraction needs pymupdf.")
-        else:
-            max_pages = st.slider("Scan pages for images", 1, 50, 10, key=f"img_pdf_pages_{p.name}")
-            max_imgs = st.slider("Max images to show", 5, 200, 30, key=f"img_pdf_max_{p.name}")
-            imgs = extract_images_from_pdf(p, max_pages=max_pages, max_images=max_imgs)
-            render_image_gallery(imgs, label_key="page")
+            else:
+                st.info("Image extraction is available for PDF and PPTX. For PNG/JPG, use the View file tab.")
 
-    elif suf == ".pptx":
-        if not PPTX_OK:
-            st.warning("PPTX image extraction needs python-pptx.")
-        else:
-            max_slides = st.slider("Scan slides for images", 1, 100, 30, key=f"img_pptx_slides_{p.name}")
-            max_imgs = st.slider("Max images to show", 5, 200, 50, key=f"img_pptx_max_{p.name}")
-            imgs = extract_images_from_pptx(p, max_slides=max_slides, max_images=max_imgs)
-            render_image_gallery(imgs, label_key="slide")
-
-    else:
-        st.info("Image extraction is available for PDF and PPTX. For PNG/JPG, use the View tab.")
 
 # -----------------------------
 # Update Plan gate
@@ -765,12 +782,12 @@ else:
         assess_subject = st.selectbox("Subject", subjects_clean, key="assess_subject_groq")
 
         meta = load_meta()
-        subject_paths = []
+        subject_paths: List[Path] = []
         for item in meta.get("files", []):
             if item.get("subject") == assess_subject:
-                p = Path(item.get("path", ""))
-                if p.exists() and p.suffix.lower() in [".txt", ".pdf", ".pptx"]:
-                    subject_paths.append(p)
+                pf = Path(item.get("path", ""))
+                if pf.exists() and pf.suffix.lower() in [".txt", ".pdf", ".pptx"]:
+                    subject_paths.append(pf)
 
         if not subject_paths:
             st.warning("Upload at least one TXT, PDF, or PPTX notes file for this subject.")
@@ -786,10 +803,8 @@ else:
                 n_items = st.slider("Number of questions", 5, 20, 10)
                 difficulty = st.select_slider("Difficulty", ["easy", "medium", "hard"], value="medium")
 
-                # Generate quiz
                 if st.button("🧩 Generate Quiz"):
                     notes_limited = notes_text[:5500]
-
                     prompt = f"""
 Return ONLY JSON. No markdown. No extra text.
 
@@ -841,7 +856,6 @@ NOTES:
                         st.error("Quiz generation failed (non-JSON). Try again or use cleaner notes.")
                         st.text_area("Raw output", raw if "raw" in locals() else "", height=220)
 
-                # Show quiz + answer inputs
                 if st.session_state.quiz and st.session_state.quiz_subject == assess_subject:
                     quiz = st.session_state.quiz
                     questions = quiz.get("questions", [])
@@ -870,19 +884,20 @@ NOTES:
 
                         st.write("---")
 
-                    # Grade button
                     if st.button("✅ Check my answers (AI)"):
                         payload = []
                         for q in questions:
                             qid = q.get("id", "")
-                            payload.append({
-                                "id": qid,
-                                "type": q.get("type", ""),
-                                "question": q.get("question", ""),
-                                "choices": q.get("choices", {}),
-                                "expected": q.get("answer_key", ""),
-                                "user_answer": st.session_state.user_answers.get(qid, "")
-                            })
+                            payload.append(
+                                {
+                                    "id": qid,
+                                    "type": q.get("type", ""),
+                                    "question": q.get("question", ""),
+                                    "choices": q.get("choices", {}),
+                                    "expected": q.get("answer_key", ""),
+                                    "user_answer": st.session_state.user_answers.get(qid, ""),
+                                }
+                            )
 
                         grade_prompt = f"""
 Return ONLY JSON.
@@ -992,8 +1007,14 @@ plan_rows = []
 for i in range(days_to_plan):
     day_label = (pd.Timestamp(today) + pd.Timedelta(days=i)).strftime("%b %d, %Y")
     for idx in range(len(top)):
-        plan_rows.append({"Day": day_label, "Subject": top.loc[idx, "Subject"], "Minutes": int(round(minutes_per_day * split[idx]))})
+        plan_rows.append(
+            {
+                "Day": day_label,
+                "Subject": top.loc[idx, "Subject"],
+                "Minutes": int(round(minutes_per_day * split[idx])),
+            }
+        )
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ PDF preview renders pages as images (pymupdf). PPTX supported (python-pptx). Assessment: you answer first, then AI checks.")
+st.caption("✅ PDF pages render as images (includes pictures). Images tab extracts embedded images from PDF/PPTX. Assessment: you answer first, then AI checks.")
