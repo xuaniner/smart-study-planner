@@ -313,7 +313,6 @@ def render_image_gallery(items: List[Dict[str, Any]], label_key: str, file_key_p
         st.info("No embedded images found.")
         return
 
-    # Simple, user-controlled density (works on mobile/desktop)
     cols_per_row = st.select_slider(
         "Gallery columns",
         options=[1, 2, 3, 4],
@@ -425,7 +424,7 @@ edited_df = st.data_editor(
     },
 )
 
-cA, cB, = st.columns([1, 1 ])
+cA, cB, = st.columns([1, 1, ])
 with cA:
     if st.button("💾 Save changes"):
         st.session_state.subjects = edited_df.copy()
@@ -437,6 +436,7 @@ with cB:
         save_df(st.session_state.subjects)
         st.success("Reset done!")
         st.rerun()
+
 subjects_clean = (
     pd.Series(st.session_state.subjects["Subject"])
     .dropna()
@@ -531,7 +531,7 @@ else:
 
 
 # -----------------------------
-# Preview section (PDF/PPTX/TXT/Images)
+# Preview section (images INCLUDED in View file)
 # -----------------------------
 if st.session_state.preview_path:
     p = Path(st.session_state.preview_path)
@@ -547,31 +547,58 @@ if st.session_state.preview_path:
                 st.session_state.preview_subject = ""
                 st.rerun()
 
-        tab1, tab2, tab3 = st.tabs(["📄 View file", "📝 Extracted text", "🖼 Images"])
+        tab1, tab2 = st.tabs(["📄 View file", "📝 Extracted text"])
 
-        # ---------------- TAB 1 ----------------
+        # ---------------- TAB 1 (View file) ----------------
         with tab1:
             suf = p.suffix.lower()
 
             if suf == ".pdf":
-                pdf_bytes = p.read_bytes()
+                # PDF pages rendered as images already include pictures/diagrams/scans
                 st.download_button(
                     "⬇️ Download PDF",
-                    data=pdf_bytes,
+                    data=p.read_bytes(),
                     file_name=p.name,
                     mime="application/pdf",
                     key=f"prev_dl_pdf_{p.name}",
                 )
 
                 if PDF_RENDER_OK:
-                    st.caption("Showing first pages as images (includes pictures/diagrams).")
+                    mode = st.selectbox(
+                        "View mode",
+                        ["Single page", "Continuous (paged)"],
+                        index=0,
+                        key=f"pdf_mode_{p.name}",
+                    )
+                    zoom = st.slider("Zoom", 1.0, 3.0, 1.8, 0.1, key=f"pdf_zoom_{p.name}")
+
                     try:
                         doc = fitz.open(str(p))
-                        max_pages = min(5, doc.page_count)
-                        for i in range(max_pages):
-                            page = doc.load_page(i)
-                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                            st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {i+1}")
+                        total = doc.page_count
+
+                        if mode == "Single page":
+                            page_num = st.number_input("Page", 1, total, 1, 1, key=f"pdf_page_{p.name}")
+                            page = doc.load_page(int(page_num) - 1)
+                            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                            st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {page_num}/{total}")
+
+                        else:
+                            per_batch = st.select_slider(
+                                "Pages per batch",
+                                options=[2, 3, 4, 5, 6, 8, 10],
+                                value=4,
+                                key=f"pdf_batch_{p.name}",
+                            )
+                            start = st.number_input("Start page", 1, total, 1, 1, key=f"pdf_start_{p.name}")
+                            end = min(total, int(start) + int(per_batch) - 1)
+                            st.caption(f"Showing pages {start}–{end} of {total}")
+
+                            for i in range(int(start) - 1, end):
+                                page = doc.load_page(i)
+                                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                                with st.expander(f"Page {i+1}", expanded=(i == int(start) - 1)):
+                                    st.image(pix.tobytes("png"), use_container_width=True)
+
                         doc.close()
                     except Exception:
                         st.warning("Could not render PDF preview. Use Download instead.")
@@ -579,67 +606,54 @@ if st.session_state.preview_path:
                     st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
 
             elif suf == ".pptx":
-    st.download_button(
-        "⬇️ Download PPTX",
-        data=p.read_bytes(),
-        file_name=p.name,
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        key=f"prev_dl_pptx_{p.name}",
-    )
-
-    if not PPTX_OK:
-        st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
-    else:
-        # Controls so it won't overwhelm mobile/desktop
-        show_text = st.toggle("Show slide text", value=True, key=f"pptx_show_text_{p.name}")
-        show_images = st.toggle("Show images", value=True, key=f"pptx_show_images_{p.name}")
-
-        max_slides = st.slider("Slides to scan", 1, 150, 30, key=f"pptx_view_maxslides_{p.name}")
-
-        if show_text:
-            txt = extract_text_from_pptx(p, max_slides=int(max_slides))
-            if txt.strip():
-                st.text_area("Slide text", txt, height=320)
-            else:
-                st.info("No slide text found (maybe mostly images).")
-
-        if show_images:
-            max_imgs = st.slider("Max images to show", 5, 300, 50, key=f"pptx_view_maximgs_{p.name}")
-            imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
-
-            if not imgs:
-                st.info("No embedded images found in this PPTX.")
-            else:
-                # Gallery directly inside View file
-                st.markdown("### 🖼 Images in slides")
-                render_image_gallery(
-                    imgs,
-                    label_key="slide",
-                    file_key_prefix=f"view_pptx_{p.name}",
+                st.download_button(
+                    "⬇️ Download PPTX",
+                    data=p.read_bytes(),
+                    file_name=p.name,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key=f"prev_dl_pptx_{p.name}",
                 )
 
-
-                if PPTX_OK:
-                    txt = extract_text_from_pptx(p, max_slides=50)
-                    if not txt.strip():
-                        st.info("No slide text found (maybe mostly images). Check the Images tab.")
-                    else:
-                        st.caption("Previewing extracted slide text (fast + mobile-friendly).")
-                        st.text_area("Slide text preview", txt, height=420)
-                else:
+                if not PPTX_OK:
                     st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
+                else:
+                    # Not overwhelming: toggles + limits
+                    show_text = st.toggle("Show slide text", value=True, key=f"pptx_show_text_{p.name}")
+                    show_images = st.toggle("Show images", value=True, key=f"pptx_show_images_{p.name}")
+                    max_slides = st.slider("Slides to scan", 1, 150, 30, key=f"pptx_view_maxslides_{p.name}")
+
+                    if show_text:
+                        txt = extract_text_from_pptx(p, max_slides=int(max_slides))
+                        if txt.strip():
+                            st.text_area("Slide text", txt, height=320)
+                        else:
+                            st.info("No slide text found (maybe mostly images).")
+
+                    if show_images:
+                        max_imgs = st.slider("Max images to show", 5, 300, 50, key=f"pptx_view_maximgs_{p.name}")
+                        imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
+
+                        if not imgs:
+                            st.info("No embedded images found in this PPTX.")
+                        else:
+                            st.markdown("### 🖼 Images in slides")
+                            render_image_gallery(
+                                imgs,
+                                label_key="slide",
+                                file_key_prefix=f"view_pptx_{p.name}",
+                            )
 
             elif suf == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=420)
 
             else:
-                # For PNG/JPG/etc.
+                # For image files: show directly
                 try:
                     st.image(str(p), use_container_width=True)
                 except Exception:
                     st.info("Preview not available. Use Download.")
 
-        # ---------------- TAB 2 ----------------
+        # ---------------- TAB 2 (Extracted text) ----------------
         with tab2:
             suf = p.suffix.lower()
             if suf in [".txt", ".pdf", ".pptx"]:
@@ -653,31 +667,6 @@ if st.session_state.preview_path:
                     st.text_area("Extracted text", txt, height=420)
             else:
                 st.info("Text extraction is available for TXT/PDF/PPTX only.")
-
-        # ---------------- TAB 3 ----------------
-        with tab3:
-            suf = p.suffix.lower()
-
-            if suf == ".pdf":
-                if not PDF_RENDER_OK:
-                    st.warning("PDF image extraction needs pymupdf.")
-                else:
-                    max_pages = st.slider("Scan pages for embedded images", 1, 80, 10, key=f"img_pdf_pages_{p.name}")
-                    max_imgs = st.slider("Max images to show", 5, 300, 30, key=f"img_pdf_max_{p.name}")
-                    imgs = extract_images_from_pdf(p, max_pages=int(max_pages), max_images=int(max_imgs))
-                    render_image_gallery(imgs, label_key="page", file_key_prefix=f"gal_pdf_{p.name}")
-
-            elif suf == ".pptx":
-                if not PPTX_OK:
-                    st.warning("PPTX image extraction needs python-pptx.")
-                else:
-                    max_slides = st.slider("Scan slides for images", 1, 150, 30, key=f"img_pptx_slides_{p.name}")
-                    max_imgs = st.slider("Max images to show", 5, 300, 50, key=f"img_pptx_max_{p.name}")
-                    imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
-                    render_image_gallery(imgs, label_key="slide", file_key_prefix=f"gal_pptx_{p.name}")
-
-            else:
-                st.info("Image extraction is available for PDF and PPTX. For PNG/JPG, use the View file tab.")
 
 
 # -----------------------------
@@ -1049,4 +1038,4 @@ for i in range(days_to_plan):
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ PDF pages render as images (includes pictures). Images tab extracts embedded images from PDF/PPTX. Assessment: you answer first, then AI checks.")
+st.caption("✅ PDF pages render as images (includes pictures). PPTX View file shows slide text + embedded images. Assessment: you answer first, then AI checks.")
