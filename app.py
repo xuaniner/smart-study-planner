@@ -6,6 +6,7 @@ import time
 import json
 import re
 import os
+import io
 
 # PDF text extraction
 try:
@@ -22,6 +23,23 @@ try:
 except Exception:
     PDF_RENDER_OK = False
 
+# PPTX extraction
+PPTX_OK = False
+try:
+    from pptx import Presentation
+    PPTX_OK = True
+except Exception:
+    PPTX_OK = False
+
+# Optional OCR (only used if you already implemented "A")
+OCR_OK = False
+try:
+    import pytesseract
+    from PIL import Image
+    OCR_OK = True
+except Exception:
+    OCR_OK = False
+
 # Groq
 GROQ_OK = False
 try:
@@ -36,7 +54,7 @@ except Exception:
 # -----------------------------
 st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="wide")
 st.title("📚 Smart Study Planner")
-st.caption("From the section of STEM A")
+st.caption("Planner + Timer + Study Files + Assessments (Groq)")
 
 
 # -----------------------------
@@ -105,21 +123,6 @@ def load_meta() -> dict:
 def save_meta(meta: dict) -> None:
     META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-def extract_text_from_path(p: Path) -> str:
-    suf = p.suffix.lower()
-    if suf == ".txt":
-        return p.read_text(errors="ignore")
-    if suf == ".pdf" and PDF_OK:
-        try:
-            reader = PdfReader(str(p))
-            parts = []
-            for page in reader.pages[:12]:
-                parts.append(page.extract_text() or "")
-            return "\n".join(parts)
-        except Exception:
-            return ""
-    return ""
-
 def normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
@@ -134,6 +137,90 @@ def parse_json_loose(raw: str):
     if start != -1 and end != -1 and end > start:
         return json.loads(raw[start:end + 1])
     raise ValueError("No JSON object found")
+
+def extract_text_from_pdf_text(p: Path, max_pages: int = 12) -> str:
+    """Extract selectable text from PDF (not OCR)."""
+    if not (p.suffix.lower() == ".pdf" and PDF_OK):
+        return ""
+    try:
+        reader = PdfReader(str(p))
+        parts = []
+        for page in reader.pages[:max_pages]:
+            parts.append(page.extract_text() or "")
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+def ocr_pdf_with_pymupdf(p: Path, max_pages: int = 6, zoom: float = 2.0) -> str:
+    """OCR scanned PDF pages using PyMuPDF render + pytesseract (optional)."""
+    if not (PDF_RENDER_OK and OCR_OK):
+        return ""
+    try:
+        doc = fitz.open(str(p))
+        pages = min(max_pages, doc.page_count)
+        parts = []
+        for i in range(pages):
+            page = doc.load_page(i)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(img) or ""
+            text = text.strip()
+            if text:
+                parts.append(f"[Page {i+1}]\n{text}")
+        doc.close()
+        return "\n\n".join(parts).strip()
+    except Exception:
+        return ""
+
+def extract_text_from_pptx(p: Path, max_slides: int = 50) -> str:
+    """Extract visible text from PPTX shapes (no image OCR)."""
+    if not (PPTX_OK and p.suffix.lower() == ".pptx"):
+        return ""
+    try:
+        prs = Presentation(str(p))
+        out = []
+        for i, slide in enumerate(prs.slides):
+            if i >= max_slides:
+                break
+            chunks = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text:
+                    t = shape.text.strip()
+                    if t:
+                        chunks.append(t)
+            if chunks:
+                out.append(f"[Slide {i+1}]\n" + "\n".join(chunks))
+        return "\n\n".join(out).strip()
+    except Exception:
+        return ""
+
+def extract_text_smart(p: Path) -> str:
+    """
+    TXT: read
+    PDF: try selectable text; if too short and OCR available -> OCR fallback
+    PPTX: extract slide text
+    """
+    suf = p.suffix.lower()
+
+    if suf == ".txt":
+        try:
+            return p.read_text(errors="ignore").strip()
+        except Exception:
+            return ""
+
+    if suf == ".pptx":
+        return extract_text_from_pptx(p)
+
+    if suf == ".pdf":
+        txt = extract_text_from_pdf_text(p, max_pages=12)
+        # If PDF is scanned, selectable text is often empty/very short
+        if len(normalize_spaces(txt)) < 200:
+            ocr_txt = ocr_pdf_with_pymupdf(p, max_pages=6, zoom=2.0)
+            if ocr_txt:
+                return ocr_txt
+        return txt
+
+    return ""
 
 
 # -----------------------------
@@ -168,13 +255,13 @@ if "preview_subject" not in st.session_state:
 
 # assessment state
 if "quiz" not in st.session_state:
-    st.session_state.quiz = None   # stores generated quiz json
+    st.session_state.quiz = None
 if "quiz_subject" not in st.session_state:
     st.session_state.quiz_subject = ""
 if "quiz_file" not in st.session_state:
     st.session_state.quiz_file = ""
 if "user_answers" not in st.session_state:
-    st.session_state.user_answers = {}  # question_id -> answer text
+    st.session_state.user_answers = {}
 
 
 # -----------------------------
@@ -242,7 +329,7 @@ subjects_clean = subjects_clean[subjects_clean != ""].tolist()
 
 
 # -----------------------------
-# Study Files (tagged by subject) + Preview as images for PDF
+# Study Files (tagged by subject) + Preview
 # -----------------------------
 st.subheader("📁 Study Files (tagged by subject)")
 meta = load_meta()
@@ -252,11 +339,13 @@ with st.expander("Upload study files", expanded=False):
         st.warning("Add at least 1 subject first so files can be tagged.")
     else:
         tag_subject = st.selectbox("Which subject is this file for?", subjects_clean)
+
         uploads = st.file_uploader(
-            "Upload notes (TXT / PDF / images)",
-            type=["txt", "pdf", "png", "jpg", "jpeg"],
+            "Upload notes (TXT / PDF / PPTX / images)",
+            type=["txt", "pdf", "pptx", "png", "jpg", "jpeg"],
             accept_multiple_files=True,
         )
+
         if st.button("⬆️ Save uploaded files"):
             if not uploads:
                 st.warning("No files selected.")
@@ -339,7 +428,9 @@ if st.session_state.preview_path:
         tab1, tab2 = st.tabs(["📄 View file", "📝 Extracted text"])
 
         with tab1:
-            if p.suffix.lower() == ".pdf":
+            suf = p.suffix.lower()
+
+            if suf == ".pdf":
                 pdf_bytes = p.read_bytes()
                 st.download_button(
                     "⬇️ Download PDF",
@@ -356,15 +447,35 @@ if st.session_state.preview_path:
                         max_pages = min(5, doc.page_count)
                         for i in range(max_pages):
                             page = doc.load_page(i)
-                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # higher quality
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                             st.image(pix.tobytes("png"), use_container_width=True, caption=f"Page {i+1}")
                         doc.close()
                     except Exception:
                         st.warning("Could not render PDF preview. Use Download instead.")
                 else:
                     st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
-            elif p.suffix.lower() == ".txt":
+
+            elif suf == ".pptx":
+                st.download_button(
+                    "⬇️ Download PPTX",
+                    data=p.read_bytes(),
+                    file_name=p.name,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key=f"prev_dl_{p.name}",
+                )
+                if not PPTX_OK:
+                    st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
+                else:
+                    txt = extract_text_from_pptx(p, max_slides=50)
+                    if not txt.strip():
+                        st.info("No slide text found (maybe mostly images). Use Download.")
+                    else:
+                        st.caption("Previewing slide text (fast + mobile-friendly).")
+                        st.text_area("Slide text preview", txt, height=420)
+
+            elif suf == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=380)
+
             else:
                 try:
                     st.image(str(p), use_container_width=True)
@@ -372,14 +483,18 @@ if st.session_state.preview_path:
                     st.info("Preview not available. Use Download.")
 
         with tab2:
-            if p.suffix.lower() in [".txt", ".pdf"]:
-                txt = extract_text_from_path(p)
+            suf = p.suffix.lower()
+            if suf in [".txt", ".pdf", ".pptx"]:
+                txt = extract_text_smart(p)
                 if not txt.strip():
-                    st.warning("No text extracted. (PDF text extraction needs pypdf; scanned PDFs may have no text.)")
+                    if suf == ".pdf" and OCR_OK:
+                        st.warning("No text extracted. If this is scanned, OCR may be failing on your host.")
+                    else:
+                        st.warning("No text extracted.")
                 else:
                     st.text_area("Extracted text", txt, height=380)
             else:
-                st.info("Text extraction is available for TXT/PDF only.")
+                st.info("Text extraction is available for TXT/PDF/PPTX only.")
 
 
 # -----------------------------
@@ -520,18 +635,18 @@ else:
         for item in meta.get("files", []):
             if item.get("subject") == assess_subject:
                 p = Path(item.get("path", ""))
-                if p.exists() and p.suffix.lower() in [".txt", ".pdf"]:
+                if p.exists() and p.suffix.lower() in [".txt", ".pdf", ".pptx"]:
                     subject_paths.append(p)
 
         if not subject_paths:
-            st.warning("Upload at least one TXT or PDF notes file for this subject.")
+            st.warning("Upload at least one TXT, PDF, or PPTX notes file for this subject.")
         else:
             chosen_file = st.selectbox("Notes file", [p.name for p in subject_paths], key="assess_file_groq")
             pfile = next(x for x in subject_paths if x.name == chosen_file)
 
-            notes_text = normalize_spaces(extract_text_from_path(pfile))
+            notes_text = normalize_spaces(extract_text_smart(pfile))
             if not notes_text:
-                st.warning("No text extracted (scanned PDF = no text). Try TXT or different PDF.")
+                st.warning("No text extracted. If PDF is scanned, OCR must be available; PPTX may be image-only.")
             else:
                 st.caption("Step 1: Generate quiz. Step 2: Answer. Step 3: AI checks your answers.")
                 n_items = st.slider("Number of questions", 5, 20, 10)
@@ -610,7 +725,7 @@ NOTES:
                         if qtype == "mcq":
                             choices = q.get("choices", {})
                             options = []
-                            for k in ["A","B","C","D"]:
+                            for k in ["A", "B", "C", "D"]:
                                 if k in choices:
                                     options.append(f"{k}) {choices[k]}")
                             pick = st.radio("Your answer", options, key=f"ans_{qid}", index=0 if options else 0)
@@ -623,7 +738,6 @@ NOTES:
 
                     # Grade button
                     if st.button("✅ Check my answers (AI)"):
-                        # Build grading payload WITHOUT showing keys to user
                         payload = []
                         for q in questions:
                             qid = q.get("id", "")
@@ -748,4 +862,4 @@ for i in range(days_to_plan):
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ PDF preview renders pages as images (pymupdf). Assessment: you answer first, then AI checks.")
+st.caption("✅ PDF preview renders pages as images (pymupdf). PPTX supported (python-pptx). Assessment: you answer first, then AI checks.")
