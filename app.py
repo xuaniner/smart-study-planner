@@ -7,38 +7,35 @@ import json
 import re
 import os
 import io
-import mimetypes
-from typing import List, Dict, Any
+import subprocess
+from typing import List, Dict, Any, Optional
 
 # -----------------------------
 # Optional libraries
 # -----------------------------
 
-# PDF text extraction (selectable text)
+# PDF selectable text extraction
 try:
     from pypdf import PdfReader
-    PDF_OK = True
+    PDF_TEXT_OK = True
 except Exception:
-    PDF_OK = False
+    PDF_TEXT_OK = False
 
-# PDF rendering (preview pages as images) + optional image extraction + OCR rendering
-PDF_RENDER_OK = False
+# PDF rendering (pages -> images)
 try:
     import fitz  # PyMuPDF
     PDF_RENDER_OK = True
 except Exception:
     PDF_RENDER_OK = False
 
-# PPTX parsing (text + embedded images)
-PPTX_OK = False
+# PPTX text extraction (fallback only)
 try:
     from pptx import Presentation
     PPTX_OK = True
 except Exception:
     PPTX_OK = False
 
-# OCR for scanned PDFs (optional) — requires pytesseract + pillow + tesseract binary
-OCR_OK = False
+# OCR for scanned PDFs (optional)
 try:
     import pytesseract
     from PIL import Image
@@ -47,7 +44,6 @@ except Exception:
     OCR_OK = False
 
 # Groq
-GROQ_OK = False
 try:
     from groq import Groq
     GROQ_OK = True
@@ -144,8 +140,9 @@ def parse_json_loose(raw: str):
         return json.loads(raw[start:end + 1])
     raise ValueError("No JSON object found")
 
+# ----- PDF text + OCR -----
 def extract_text_from_pdf_text(p: Path, max_pages: int = 12) -> str:
-    if not (PDF_OK and p.suffix.lower() == ".pdf"):
+    if not (PDF_TEXT_OK and p.suffix.lower() == ".pdf"):
         return ""
     try:
         reader = PdfReader(str(p))
@@ -157,7 +154,6 @@ def extract_text_from_pdf_text(p: Path, max_pages: int = 12) -> str:
         return ""
 
 def ocr_pdf_with_pymupdf(p: Path, max_pages: int = 6, zoom: float = 2.0) -> str:
-    # Optional OCR for scanned PDFs
     if not (PDF_RENDER_OK and OCR_OK and p.suffix.lower() == ".pdf"):
         return ""
     try:
@@ -176,7 +172,8 @@ def ocr_pdf_with_pymupdf(p: Path, max_pages: int = 6, zoom: float = 2.0) -> str:
     except Exception:
         return ""
 
-def extract_text_from_pptx(p: Path, max_slides: int = 50) -> str:
+# ----- PPTX text (fallback only; real viewing = PPTX->PDF render) -----
+def extract_text_from_pptx(p: Path, max_slides: int = 60) -> str:
     if not (PPTX_OK and p.suffix.lower() == ".pptx"):
         return ""
     try:
@@ -204,8 +201,6 @@ def extract_text_smart(p: Path) -> str:
             return (p.read_text(errors="ignore") or "").strip()
         except Exception:
             return ""
-    if suf == ".pptx":
-        return extract_text_from_pptx(p, max_slides=80)
     if suf == ".pdf":
         txt = extract_text_from_pdf_text(p, max_pages=12)
         if len(normalize_spaces(txt)) < 200:
@@ -213,37 +208,45 @@ def extract_text_smart(p: Path) -> str:
             if ocr_txt:
                 return ocr_txt
         return txt
+    if suf == ".pptx":
+        return extract_text_from_pptx(p, max_slides=60)
     return ""
 
-def extract_images_from_pptx(p: Path, max_slides: int = 30, max_images: int = 50) -> List[Dict[str, Any]]:
-    if not (PPTX_OK and p.suffix.lower() == ".pptx"):
-        return []
-    images: List[Dict[str, Any]] = []
+# ----- PPTX -> PDF (real file viewer for slides) -----
+def pptx_to_pdf(pptx_path: Path) -> Optional[Path]:
+    """
+    Convert PPTX to PDF using LibreOffice (soffice) headless.
+    Streamlit Cloud: requires packages.txt with 'libreoffice'.
+    """
+    out_dir = pptx_path.parent
+    out_pdf = out_dir / f"{pptx_path.stem}.pdf"
+
     try:
-        prs = Presentation(str(p))
-        for si, slide in enumerate(prs.slides):
-            if si >= max_slides:
-                break
-            for shape in slide.shapes:
-                if len(images) >= max_images:
-                    break
-                img_obj = getattr(shape, "image", None)
-                if img_obj is None:
-                    continue
-                ext = (img_obj.ext or "png").lower()
-                images.append(
-                    {
-                        "bytes": img_obj.blob,
-                        "slide": si + 1,
-                        "ext": ext,
-                        "name": f"slide{si+1}_img{len(images)+1}.{ext}",
-                    }
-                )
-            if len(images) >= max_images:
-                break
-        return images
+        if out_pdf.exists() and out_pdf.stat().st_mtime >= pptx_path.stat().st_mtime:
+            return out_pdf
     except Exception:
-        return []
+        pass
+
+    try:
+        subprocess.run(
+            [
+                "soffice",
+                "--headless",
+                "--nologo",
+                "--nofirststartwizard",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(out_dir),
+                str(pptx_path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return out_pdf if out_pdf.exists() else None
+    except Exception:
+        return None
 
 
 # -----------------------------
@@ -381,6 +384,7 @@ with st.expander("Upload study files", expanded=False):
                         {"subject": tag_subject, "name": fname, "path": str(path), "uploaded_at": now_str()}
                     )
                     added += 1
+
                 save_meta(meta)
                 st.success(f"Saved {added} file(s) under {tag_subject}.")
                 st.rerun()
@@ -434,7 +438,9 @@ else:
 
 
 # -----------------------------
-# Preview section (images included in View file)
+# Preview (REAL FILE VIEW)
+# - PDF: render pages as images
+# - PPTX: convert to PDF (LibreOffice) then render pages as images
 # -----------------------------
 if st.session_state.preview_path:
     p = Path(st.session_state.preview_path)
@@ -452,10 +458,10 @@ if st.session_state.preview_path:
 
         tab1, tab2 = st.tabs(["📄 View file", "📝 Extracted text"])
 
-        # ---- View file ----
         with tab1:
             suf = p.suffix.lower()
 
+            # ---- PDF viewer (actual pages) ----
             if suf == ".pdf":
                 st.download_button(
                     "⬇️ Download PDF",
@@ -465,18 +471,20 @@ if st.session_state.preview_path:
                     key=f"prev_dl_pdf_{p.name}",
                 )
 
-                if PDF_RENDER_OK:
-                    mode = st.selectbox(
-                        "View mode",
-                        ["Single page", "Continuous (paged)"],
-                        index=0,
-                        key=f"pdf_mode_{p.name}",
-                    )
-                    zoom = st.slider("Zoom", 1.0, 3.0, 1.8, 0.1, key=f"pdf_zoom_{p.name}")
-
+                if not PDF_RENDER_OK:
+                    st.warning("PDF viewer needs pymupdf. Add 'pymupdf' to requirements.txt.")
+                else:
                     try:
                         doc = fitz.open(str(p))
                         total = doc.page_count
+
+                        mode = st.selectbox(
+                            "View mode",
+                            ["Single page", "Continuous (paged)"],
+                            index=0,
+                            key=f"pdf_mode_{p.name}",
+                        )
+                        zoom = st.slider("Zoom", 1.0, 3.0, 1.8, 0.1, key=f"pdf_zoom_{p.name}")
 
                         if mode == "Single page":
                             page_num = st.number_input("Page", 1, total, 1, 1, key=f"pdf_page_{p.name}")
@@ -501,10 +509,9 @@ if st.session_state.preview_path:
 
                         doc.close()
                     except Exception:
-                        st.warning("Could not render PDF preview. Use Download instead.")
-                else:
-                    st.warning("PDF preview needs pymupdf. Add 'pymupdf' to requirements.txt.")
+                        st.warning("Could not render PDF. Use Download instead.")
 
+            # ---- PPTX viewer (convert to PDF then render) ----
             elif suf == ".pptx":
                 st.download_button(
                     "⬇️ Download PPTX",
@@ -514,51 +521,67 @@ if st.session_state.preview_path:
                     key=f"prev_dl_pptx_{p.name}",
                 )
 
-                if not PPTX_OK:
-                    st.warning("PPTX preview needs python-pptx. Add 'python-pptx' to requirements.txt.")
+                if not PDF_RENDER_OK:
+                    st.warning("Slide viewer needs pymupdf. Add 'pymupdf' to requirements.txt.")
                 else:
-                    max_slides = st.slider("Slides to scan", 1, 150, 30, key=f"pptx_view_maxslides_{p.name}")
-                    max_imgs = st.slider("Max images to show", 0, 300, 50, key=f"pptx_view_maximgs_{p.name}")
-                    cols_per_row = st.select_slider("Images per row", [1, 2, 3, 4], value=2, key=f"pptx_view_cols_{p.name}")
+                    pdf_path = pptx_to_pdf(p)
+                    if not pdf_path:
+                        st.warning(
+                            "Cannot show the actual slides because PPTX→PDF conversion is not available.\n\n"
+                            "Fix:\n"
+                            "• Streamlit Cloud: create packages.txt with 'libreoffice'\n"
+                            "• Local: install LibreOffice and ensure 'soffice' is in PATH\n\n"
+                            "Fallback: use Extracted text tab."
+                        )
+                    else:
+                        try:
+                            doc = fitz.open(str(pdf_path))
+                            total = doc.page_count
 
-                    txt = extract_text_from_pptx(p, max_slides=int(max_slides))
-                    st.text_area("Slide text", txt if txt else "", height=420, key=f"pptx_text_{p.name}")
+                            mode = st.selectbox(
+                                "View mode",
+                                ["Single slide", "Continuous (paged)"],
+                                index=0,
+                                key=f"pptx_mode_{p.name}",
+                            )
+                            zoom = st.slider("Zoom", 1.0, 3.0, 1.8, 0.1, key=f"pptx_zoom_{p.name}")
 
-                    if int(max_imgs) > 0:
-                        imgs = extract_images_from_pptx(p, max_slides=int(max_slides), max_images=int(max_imgs))
-                        if imgs:
-                            for i in range(0, len(imgs), int(cols_per_row)):
-                                row = st.columns(int(cols_per_row))
-                                for k in range(int(cols_per_row)):
-                                    idx = i + k
-                                    if idx >= len(imgs):
-                                        break
-                                    it = imgs[idx]
-                                    with row[k]:
-                                        st.image(it["bytes"], use_container_width=True)
-                                        st.caption(f"Slide {it.get('slide','?')}")
-                                        mime = mimetypes.guess_type(it.get("name", "img.png"))[0] or "application/octet-stream"
-                                        st.download_button(
-                                            "Download image",
-                                            data=it["bytes"],
-                                            file_name=it.get("name", f"slide_{it.get('slide','x')}.png"),
-                                            mime=mime,
-                                            key=f"pptx_imgdl_{p.name}_{idx}",
-                                        )
-                        else:
-                            st.info("No embedded images found in this PPTX.")
+                            if mode == "Single slide":
+                                slide_num = st.number_input("Slide", 1, total, 1, 1, key=f"pptx_slide_{p.name}")
+                                page = doc.load_page(int(slide_num) - 1)
+                                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                                st.image(pix.tobytes("png"), use_container_width=True, caption=f"Slide {slide_num}/{total}")
+                            else:
+                                per_batch = st.select_slider(
+                                    "Slides per batch",
+                                    options=[2, 3, 4, 5, 6, 8, 10],
+                                    value=4,
+                                    key=f"pptx_batch_{p.name}",
+                                )
+                                start = st.number_input("Start slide", 1, total, 1, 1, key=f"pptx_start_{p.name}")
+                                end = min(total, int(start) + int(per_batch) - 1)
 
+                                for i in range(int(start) - 1, end):
+                                    page = doc.load_page(i)
+                                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                                    with st.expander(f"Slide {i+1}", expanded=(i == int(start) - 1)):
+                                        st.image(pix.tobytes("png"), use_container_width=True)
+
+                            doc.close()
+                        except Exception:
+                            st.warning("Could not render slides. Use Download instead.")
+
+            # ---- TXT ----
             elif suf == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=420)
 
+            # ---- Images ----
             else:
-                # PNG/JPG/etc.
                 try:
                     st.image(str(p), use_container_width=True)
                 except Exception:
                     st.info("Preview not available. Use Download.")
 
-        # ---- Extracted text ----
         with tab2:
             suf = p.suffix.lower()
             if suf in [".txt", ".pdf", ".pptx"]:
