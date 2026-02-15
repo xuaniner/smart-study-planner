@@ -2,4 +2,6 @@ streamlit
 pandas
 pypdf
 pymupdf
-groq
+python-pptx
+pillow
+pytesseract
