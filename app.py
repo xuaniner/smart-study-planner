@@ -11,6 +11,11 @@ import subprocess
 import shutil
 from typing import List, Dict, Any, Optional
 
+qp = st.query_params
+if qp.get("ping") == "1":
+    st.write("ok")
+    st.stop()
+
 # -----------------------------
 # Optional libraries
 # -----------------------------
