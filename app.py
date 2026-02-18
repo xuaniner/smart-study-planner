@@ -11,6 +11,9 @@ import subprocess
 import shutil
 from typing import List, Dict, Any, Optional
 
+# -----------------------------
+# Keep-warm ping (must be first)
+# -----------------------------
 qp = st.query_params
 if qp.get("ping") == "1":
     st.write("ok")
@@ -56,6 +59,25 @@ try:
 except Exception:
     GROQ_OK = False
 
+# -----------------------------
+# Access control (login gate)
+# -----------------------------
+ALLOWED = set(st.secrets.get("ACCESS_CODES", []))
+
+if "auth_ok" not in st.session_state:
+    st.session_state.auth_ok = False
+if "user_code" not in st.session_state:
+    st.session_state.user_code = ""
+if "auth_fail" not in st.session_state:
+    st.session_state.auth_fail = 0
+if "auth_lock_until" not in st.session_state:
+    st.session_state.auth_lock_until = 0.0
+
+now = time.time()
+if now < st.session_state.auth_lock_until:
+    wait = int(st.session_state.auth_lock_until - now)
+    st.error(f"Locked due to too many attempts. Try again in {wait} seconds.")
+    st.stop()
 
 # -----------------------------
 # Config
@@ -64,13 +86,31 @@ st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="w
 st.title("📚 Smart Study Planner")
 st.caption("From the works of STEM 12 A")
 
+if not st.session_state.auth_ok:
+    code_in = st.text_input("Enter access code", type="password")
+    if st.button("Login"):
+        code_in = (code_in or "").strip()
+        if code_in in ALLOWED:
+            st.session_state.auth_ok = True
+            st.session_state.user_code = code_in
+            st.session_state.auth_fail = 0
+            st.success("Access granted.")
+            st.rerun()
+        else:
+            st.session_state.auth_fail += 1
+            st.error("Wrong code.")
+            if st.session_state.auth_fail >= 5:
+                st.session_state.auth_lock_until = time.time() + 60
+            st.stop()
+
+    st.info("Ask the owner for the access code.")
+    st.stop()
+
 
 # -----------------------------
-# Profile
+# User storage key (per access code)
 # -----------------------------
-with st.expander("👤 Profile", expanded=False):
-    user_code = st.text_input("User code", value="demo").strip().lower()
-
+user_code = (st.session_state.user_code or "").strip().lower()
 safe_code = "".join(ch for ch in user_code if ch.isalnum() or ch in ["_", "-"]) or "demo"
 
 DATA_PATH = Path(f"data_{safe_code}.csv")
@@ -310,22 +350,6 @@ with st.expander("⚙️ Settings", expanded=False):
 # -----------------------------
 st.subheader("1) Subjects")
 
-with st.expander("➕ Add a subject", expanded=False):
-    new_subject = st.text_input("Subject name", placeholder="e.g., Chemistry")
-    new_diff = st.slider("Difficulty (1–5)", 1, 5, 3)
-    new_exam = st.date_input("Exam date", value=date.today() + timedelta(days=7))
-    if st.button("Add subject"):
-        s = (new_subject or "").strip()
-        if not s:
-            st.warning("Please enter a subject name.")
-        else:
-            df_add = st.session_state.subjects.copy()
-            df_add.loc[len(df_add)] = [s, int(new_diff), new_exam, 0]
-            st.session_state.subjects = df_add
-            save_df(df_add)
-            st.success(f"Added: {s}")
-            st.rerun()
-
 edited_df = st.data_editor(
     st.session_state.subjects,
     num_rows="dynamic",
@@ -337,7 +361,7 @@ edited_df = st.data_editor(
     },
 )
 
-cA, cB = st.columns([1, 1])
+cA, cB, cC = st.columns([1, 1, 1.2])
 with cA:
     if st.button("💾 Save changes"):
         st.session_state.subjects = edited_df.copy()
@@ -349,6 +373,11 @@ with cB:
         save_df(st.session_state.subjects)
         st.success("Reset done!")
         st.rerun()
+with cC:
+    if st.button("🚪 Log out"):
+        st.session_state.auth_ok = False
+        st.session_state.user_code = ""
+        st.rerun()
 
 subjects_clean = (
     pd.Series(st.session_state.subjects["Subject"])
@@ -357,7 +386,6 @@ subjects_clean = (
     .str.strip()
 )
 subjects_clean = subjects_clean[subjects_clean != ""].tolist()
-
 
 # -----------------------------
 # Study Files (tagged by subject)
@@ -466,9 +494,6 @@ if st.session_state.preview_path:
         with tab1:
             suf = p.suffix.lower()
 
-            # -------------------------
-            # PDF viewer (actual pages)
-            # -------------------------
             if suf == ".pdf":
                 st.download_button(
                     "⬇️ Download PDF",
@@ -527,9 +552,6 @@ if st.session_state.preview_path:
                     except Exception:
                         st.warning("Could not render PDF. Use Download instead.")
 
-            # -------------------------
-            # PPTX viewer (PPTX->PDF->render slides)
-            # -------------------------
             elif suf == ".pptx":
                 st.download_button(
                     "⬇️ Download PPTX",
@@ -600,24 +622,15 @@ if st.session_state.preview_path:
                         except Exception:
                             st.warning("Could not render slides. Use Download instead.")
 
-            # -------------------------
-            # TXT
-            # -------------------------
             elif suf == ".txt":
                 st.text_area("Text file", p.read_text(errors="ignore"), height=420)
 
-            # -------------------------
-            # Images (png/jpg)
-            # -------------------------
             else:
                 try:
                     st.image(str(p), use_container_width=True)
                 except Exception:
                     st.info("Preview not available. Use Download.")
 
-        # -----------------------------
-        # Extracted text
-        # -----------------------------
         with tab2:
             suf = p.suffix.lower()
             if suf in [".txt", ".pdf", ".pptx"]:
@@ -683,7 +696,8 @@ df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested
 
 
 # -----------------------------
-# Focus Timer
+# Focus Timer (auto-logs minutes)
+# NOTE: The 1-second rerun loop is kept (your original behavior).
 # -----------------------------
 st.subheader("⏱ Focus Timer (auto-logs minutes)")
 subjects_list = df["Subject"].astype(str).tolist()
@@ -998,4 +1012,4 @@ for i in range(days_to_plan):
 
 st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
 
-st.caption("✅ View file shows real pages/slides. Use 'Fit to screen' OFF to see real zoom.")
+st.caption("✅ View file shows real pages/slides. Use 'Fit to screen' OFF to see real zoom. Keep-awake ping: /?ping=1")
