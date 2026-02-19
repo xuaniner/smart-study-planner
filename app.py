@@ -9,6 +9,7 @@ import os
 import io
 import subprocess
 import shutil
+import secrets
 from typing import List, Dict, Any, Optional
 
 # -----------------------------
@@ -59,25 +60,6 @@ try:
 except Exception:
     GROQ_OK = False
 
-# -----------------------------
-# Access control (login gate)
-# -----------------------------
-ALLOWED = set(st.secrets.get("ACCESS_CODES", []))
-
-if "auth_ok" not in st.session_state:
-    st.session_state.auth_ok = False
-if "user_code" not in st.session_state:
-    st.session_state.user_code = ""
-if "auth_fail" not in st.session_state:
-    st.session_state.auth_fail = 0
-if "auth_lock_until" not in st.session_state:
-    st.session_state.auth_lock_until = 0.0
-
-now = time.time()
-if now < st.session_state.auth_lock_until:
-    wait = int(st.session_state.auth_lock_until - now)
-    st.error(f"Locked due to too many attempts. Try again in {wait} seconds.")
-    st.stop()
 
 # -----------------------------
 # Config
@@ -86,32 +68,46 @@ st.set_page_config(page_title="Smart Study Planner", page_icon="📚", layout="w
 st.title("📚 Smart Study Planner")
 st.caption("From the works of STEM 12 A")
 
-if not st.session_state.auth_ok:
-    code_in = st.text_input("Enter access code", type="password")
-    if st.button("Login"):
-        code_in = (code_in or "").strip()
-        if code_in in ALLOWED:
-            st.session_state.auth_ok = True
-            st.session_state.user_code = code_in
-            st.session_state.auth_fail = 0
-            st.success("Access granted.")
+
+# -----------------------------
+# Workspace Key (everyone can use, private per key)
+# -----------------------------
+st.subheader("🔐 Your Private Workspace")
+
+if "workspace_key" not in st.session_state:
+    st.session_state.workspace_key = ""
+
+if not st.session_state.workspace_key:
+    c1, c2 = st.columns([2, 1])
+
+    with c1:
+        key_in = st.text_input("Enter your workspace key", type="password")
+
+    with c2:
+        if st.button("Create key"):
+            st.session_state.workspace_key = secrets.token_urlsafe(16)
+            st.success("Created! Copy and save your key now.")
+            st.code(st.session_state.workspace_key)
+
+    if st.button("Use this key"):
+        if key_in.strip():
+            st.session_state.workspace_key = key_in.strip()
             st.rerun()
         else:
-            st.session_state.auth_fail += 1
-            st.error("Wrong code.")
-            if st.session_state.auth_fail >= 5:
-                st.session_state.auth_lock_until = time.time() + 60
-            st.stop()
+            st.warning("Enter a key first.")
 
-    st.info("Ask the owner for the access code.")
+    st.info("This key protects your files. If you lose it, you lose access to your saved workspace.")
     st.stop()
 
+if st.button("Switch workspace"):
+    st.session_state.workspace_key = ""
+    st.rerun()
 
 # -----------------------------
-# User storage key (per access code)
+# User storage key (per workspace key)
 # -----------------------------
-user_code = (st.session_state.user_code or "").strip().lower()
-safe_code = "".join(ch for ch in user_code if ch.isalnum() or ch in ["_", "-"]) or "demo"
+user_code = st.session_state.workspace_key
+safe_code = re.sub(r"[^a-zA-Z0-9_-]", "", user_code)[:40] or "anon"
 
 DATA_PATH = Path(f"data_{safe_code}.csv")
 FILES_DIR = Path(f"files_{safe_code}")
@@ -361,7 +357,7 @@ edited_df = st.data_editor(
     },
 )
 
-cA, cB, cC = st.columns([1, 1, 1.2])
+cA, cB = st.columns([1, 1])
 with cA:
     if st.button("💾 Save changes"):
         st.session_state.subjects = edited_df.copy()
@@ -373,11 +369,6 @@ with cB:
         save_df(st.session_state.subjects)
         st.success("Reset done!")
         st.rerun()
-with cC:
-    if st.button("🚪 Log out"):
-        st.session_state.auth_ok = False
-        st.session_state.user_code = ""
-        st.rerun()
 
 subjects_clean = (
     pd.Series(st.session_state.subjects["Subject"])
@@ -386,6 +377,7 @@ subjects_clean = (
     .str.strip()
 )
 subjects_clean = subjects_clean[subjects_clean != ""].tolist()
+
 
 # -----------------------------
 # Study Files (tagged by subject)
@@ -696,8 +688,7 @@ df["Progress %"] = (df["Minutes Done (this week)"] / df["Minutes/Week (Suggested
 
 
 # -----------------------------
-# Focus Timer (auto-logs minutes)
-# NOTE: The 1-second rerun loop is kept (your original behavior).
+# Focus Timer
 # -----------------------------
 st.subheader("⏱ Focus Timer (auto-logs minutes)")
 subjects_list = df["Subject"].astype(str).tolist()
